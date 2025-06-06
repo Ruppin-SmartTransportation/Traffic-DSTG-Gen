@@ -1055,4 +1055,4 @@ class SimManager:
     
     def save_labels_file(self, filename="ground_truth.json"):
         with open(filename, "w") as f:
-            json.dump(self.ground_truth_trips, f, indent=2)
+            json.dump(self.ground_truth_labels, f, indent=2)
