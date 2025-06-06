@@ -3,6 +3,7 @@ from torch_geometric.data import Data
 import json
 import os
 import random
+import argparse
 
 def extract_nodes(node_list):
     """
@@ -439,46 +440,66 @@ def track_vehicles_over_time(snapshot_dir, gt_path, num_snapshots=10, max_vehicl
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Convert simulation snapshots to PyTorch Geometric datasets.")
+    parser.add_argument('--input', type=str, required=True,
+                        help="Input directory containing simulation snapshot JSON files.")
+    parser.add_argument('--output', type=str, default=None,
+                        help="(Optional) Output file to save merged PyTorch Geometric dataset (.pt).")
+    parser.add_argument('--gt', type=str, default=None,
+                        help="Path to ground truth JSON file. If not provided, will look for 'ground_truth.json' in input dir.")
+    args = parser.parse_args()
 
-    SNAPSHOT_DIR = "/media/guy/StorageVolume/ThesisData"
-    GT_PATH = "ground_truth.json"  
-    
+    snapshot_dir = args.input
+    output_path = args.output
+    gt_path = args.gt or os.path.join(snapshot_dir, "ground_truth.json")
+
     # 1. Load ground truth file ONCE
-    with open(GT_PATH, "r") as f:
+    if not os.path.exists(gt_path):
+        print(f"[ERROR] Ground truth file not found: {gt_path}")
+        return
+    with open(gt_path, "r") as f:
         gt_data = json.load(f)  # {veh_id: {arrival_time: int, ...}, ...}
+
     # 2. Go over all snapshot files
-    files = [f for f in os.listdir(SNAPSHOT_DIR) if f.endswith('.json')]
+    files = [f for f in os.listdir(snapshot_dir) if f.endswith('.json')]
     files.sort()  # sort for reproducibility
+    all_pyg = []
+    all_labels = []
     for fname in files:
-        json_path = os.path.join(SNAPSHOT_DIR, fname)
+        json_path = os.path.join(snapshot_dir, fname)
         with open(json_path, 'r') as f:
             snapshot = json.load(f)
-        # 3. Convert to PyG
         node_id_map, _, _, _ = extract_nodes(snapshot['nodes'])  
         pyg_data = convert_snapshot_to_pyg(snapshot)
-        # 4. Get label tensor (eta per vehicle)
         label_tensor = build_label_tensor(snapshot, gt_data)
-        # 5. Save
         stem = os.path.splitext(fname)[0]
-        torch.save(pyg_data, os.path.join(SNAPSHOT_DIR, f"{stem}.pt"))
-        torch.save(label_tensor, os.path.join(SNAPSHOT_DIR, f"{stem}_labels.pt"))
+        # Save per-snapshot files
+        torch.save(pyg_data, os.path.join(snapshot_dir, f"{stem}.pt"))
+        torch.save(label_tensor, os.path.join(snapshot_dir, f"{stem}_labels.pt"))
         print(f"Processed: {fname}")
-    
-    validate_snapshots(SNAPSHOT_DIR, percent=0.1)
-    
+        # Optionally: merge for output
+        all_pyg.append(pyg_data)
+        all_labels.append(label_tensor)
+
+    if output_path is not None:
+        torch.save({"graphs": all_pyg, "labels": all_labels}, output_path)
+        print(f"Saved merged dataset to {output_path}")
+
+    # Optionally: validate and track
+    validate_snapshots(snapshot_dir, percent=0.1)
     track_vehicles_over_time(
-        snapshot_dir=SNAPSHOT_DIR,
-        gt_path=GT_PATH,
-        num_snapshots=20,      # How many snapshots to check (adjust as needed)
-        max_vehicles=5         # How many vehicles to track
+        snapshot_dir=snapshot_dir,
+        gt_path=gt_path,
+        num_snapshots=20,
+        max_vehicles=5
     )
-    
     check_all_snapshot_labels(
-        snapshot_dir=SNAPSHOT_DIR,
-        gt_path=GT_PATH,
-        max_snapshots=5,      # Check 5 snapshots
-        max_vehicles=10,      # Show up to 10 vehicles per snapshot
+        snapshot_dir=snapshot_dir,
+        gt_path=gt_path,
+        max_snapshots=5,
+        max_vehicles=10,
         only_print_errors=False
     )
+
 if __name__ == "__main__":
     main()

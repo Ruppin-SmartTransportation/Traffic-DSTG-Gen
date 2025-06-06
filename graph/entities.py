@@ -951,10 +951,13 @@ class SimManager:
         return total
     
     def calculate_simulation_limit(self, config):
+        # Calculate the total simulation time limit based on the configuration
+        # Allow for an additional 30 minutes for finalization
+        extra_time = 1800  # 30 minutes in seconds
         num_weeks = config["vehicle_generation"]["simulation_weeks"]
         seconds_in_day = 86400
         seconds_in_week = seconds_in_day * 7
-        return num_weeks * seconds_in_week 
+        return num_weeks * seconds_in_week + extra_time 
 
     def update(self, current_step, traci):
         for vid in self.get_vehicles_in_route():
@@ -1013,7 +1016,6 @@ class SimManager:
         
         if current_step % 300 == 0:
             self.log.info(f"step {current_step} time {self.convert_seconds_to_time(current_step)} vehicles in route: {len(self.vehicles_in_route)}") 
-            print(f"step {current_step} time {self.convert_seconds_to_time(current_step)} vehicles in route: {len(self.vehicles_in_route)}") 
 
     def save_snapshot(self, snapshot_dir, step):
         
