@@ -19,7 +19,6 @@ This toolkit integrates with SUMO (Simulation of Urban Mobility) and supports us
 
 > **Simulation of urban_three_zones scenario**  
 
-
 ![Simulation Demo](tools/demo.gif)
 
 ---
@@ -48,7 +47,7 @@ This toolkit integrates with SUMO (Simulation of Urban Mobility) and supports us
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/Traffic-DSTG-Gen.git
+git clone https://github.com/Ruppin-SmartTransportation/Traffic-DSTG-Gen.git
 cd Traffic-DSTG-Gen
 ```
 
@@ -132,6 +131,56 @@ python tools/convert_to_pt.py --input <simulation_output_dir> --output <dataset.
 
 ---
 
+## Sample Output
+
+### Example Snapshot Output (`.json`)
+
+```json
+{
+  "step": 600,
+  "nodes": [
+    {
+      "id": "veh_23",
+      "node_type": 1,
+      "speed": 12.3,
+      "current_zone": "B",
+      "origin_zone": "A",
+      "destination_zone": "C",
+      "...": "..."
+    },
+    {
+      "id": "junction_4",
+      "node_type": 0,
+      "zone": "B",
+      "type": "traffic_light",
+      "...": "..."
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge_1",
+      "from": "veh_23",
+      "to": "junction_4",
+      "density": 0.3,
+      "zone": "B",
+      "...": "..."
+    }
+  ]
+}
+```
+*Fields truncated for clarity—see real output for full details.*
+
+### Example Usage: Loading a `.pt` Graph
+
+```python
+import torch
+data = torch.load('traffic_data/step_600.pt')
+print(data)
+# Data(x=[n_nodes, n_features], edge_index=[2, n_edges], edge_attr=[n_edges, n_edge_features], ...)
+```
+
+---
+
 ## Simulation Scenario: Three Urban Zones
 
 The provided `urban_three_zones.net.xml` network models a realistic city environment with:
@@ -160,7 +209,7 @@ If you use Traffic-DSTG-Gen in your research or publication, please cite this re
   author = {Your Name and Collaborators},
   title = {Traffic-DSTG-Gen: Dynamic Spatio-Temporal Graph Generator for Traffic Simulation Data},
   year = {2024},
-  howpublished = {\url{https://github.com/yourusername/Traffic-DSTG-Gen}},
+  howpublished = {\url{https://github.com/Ruppin-SmartTransportation/Traffic-DSTG-Gen}},
 }
 ```
 
@@ -168,8 +217,16 @@ If you use Traffic-DSTG-Gen in your research or publication, please cite this re
 
 ## Acknowledgments
 
-This project was supported by [Your Grant/Institute Name].  
-Special thanks to [Your Advisor/Collaborators] and the open-source SUMO and PyTorch Geometric communities.
+This project was funded by the **Ministry of Innovation, Science, and Technology** (MOST) and the **Ministry of Transport and Road Safety, Israel** (2024–2027) as part of the national program for Smart Transportation research (Grant #0007846).  
+Special thanks to the Division of Planning & Development, Ruppin Academic Center, and project coordinator **Dr. Nadav Voloch**.
+
+This research is based on, and extends, the methodology presented in:  
+**Voloch, N., & Voloch-Bloch, N. (2021). "Finding the fastest navigation route by real-time future traffic estimations." 2021 IEEE International Conference on Microwaves, Antennas, Communications and Electronic Systems (COMCAS), pp. 13-16. IEEE.**  
+Available at: [https://www.researchgate.net/publication/356828106_Finding_the_fastest_navigation_rout_by_real-time_future_traffic_estimations](https://www.researchgate.net/publication/356828106_Finding_the_fastest_navigation_rout_by_real-time_future_traffic_estimations)
+
+We gratefully acknowledge the support and comments of our collaborators and reviewers, and the open-source SUMO and PyTorch Geometric communities.
+
+> **Note:** All publications arising from this work must acknowledge the support of the Ministry of Innovation, Science, and Technology and the Ministry of Transport and Road Safety, as per the grant requirements.
 
 ---
 
@@ -179,4 +236,4 @@ This project is licensed under the terms of the [MIT License](LICENSE).
 
 ---
 
-*For questions or collaboration inquiries, please contact [your.email@institute.edu].*
+*For questions or collaboration inquiries, please contact [turgibot@gmail.com].*
