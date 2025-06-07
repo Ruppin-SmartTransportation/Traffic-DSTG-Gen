@@ -17,8 +17,8 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    sumo_binary = "sumo-gui" if args.sumo_gui else "sumo"
-
+    sumo_binary = "sumo" if args.sumo_gui else "sumo-gui"
+    print(f"Using SUMO binary: {sumo_binary}")
     # Load config
     with open(args.config) as f:
         config = json.load(f)
@@ -32,10 +32,8 @@ if __name__ == "__main__":
     sim = SimManager(net)
     sim.load_zones()
     sim.populate_vehicles_from_config(config)
-
-    # Summary output
     sim.schedule_from_config(config)
-
+    sim.clear_roads_and_zones()
     # Launch SUMO with TraCI
     sumo_cmd = [sumo_binary, "-c", args.sumocfg, "--start"]
     limit = sim.calculate_simulation_limit(config)

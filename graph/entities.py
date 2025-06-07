@@ -148,7 +148,8 @@ class Road:
             "num_lanes": self.num_lanes,
             "zone": self.zone,
             "density": self.density,
-            "avg_speed": self.avg_speed
+            "avg_speed": self.avg_speed,
+            "vehicles_on_road": sorted(self.vehicles_on_road.keys())    
         }
 
 
@@ -254,6 +255,8 @@ class Vehicle:
             "current_x": self.current_x,
             "current_y": self.current_y,
             "current_zone": self.current_zone,
+            "current_edge": self.current_edge,
+            "current_position": self.current_position,
 
             # Routing and scheduling properties
             
@@ -360,14 +363,6 @@ class DataBase:
             junction.incoming_roads = set(incoming_roads)
         if outgoing_roads is not None:
             junction.outgoing_roads = set(outgoing_roads)
-
-    def update_road(self, road_id, vehicles_on_road=None):
-        road = self.get_road(road_id)
-        if not road:
-            return
-        if vehicles_on_road is not None:
-            road.vehicles_on_road = vehicles_on_road
-            road.set_density()
 
     def add_zone(self, zone):
         self.zones[zone.id] = zone
@@ -661,6 +656,19 @@ class SimManager:
 
         self.db.print_zone_statistics()
 
+    def clear_roads_and_zones(self):
+        """
+        Clears all roads and zones vehicles before dispatching.
+        """
+        for road in self.db.roads.values():
+            road.vehicles_on_road.clear()
+            road.density = 0.0
+            road.avg_speed = 0.0
+
+        for zone in self.db.zones.values():
+            zone.original_vehicles.clear()
+            zone.current_vehicles.clear()
+
     def assign_destinations(self, vehicle, zone_map, landmark_map):
 
         # HOME
@@ -794,7 +802,12 @@ class SimManager:
                 vehicle.origin_x, vehicle.origin_y = traci.simulation.convert2D(vehicle.origin_edge, float(vehicle.origin_position), 0)
                 vehicle.current_x, vehicle.current_y = vehicle.origin_x, vehicle.origin_y
                 vehicle.destination_x, vehicle.destination_y = traci.simulation.convert2D(vehicle.destination_edge, float(vehicle.destination_position), 0)
-
+                road = self.db.get_road(vehicle.current_edge)
+                if road:
+                    road.add_vehicle_and_update(vehicle)
+                else:
+                    self.log.fatal(f"Road {vehicle.current_edge} not found in database. Cannot add vehicle {vehicle.id}.")
+                    exit(1)
                 traci.vehicle.subscribe(vehicle.id, [tc.VAR_ROAD_ID])
                 self.vehicles_in_route.append(vehicle.id)
                 self.log.info(f"[DISPATCHED] {vehicle.id} from {origin_label} to {destination_label} at step {vehicle.origin_step} distance {vehicle.route_length}m.")
@@ -960,9 +973,9 @@ class SimManager:
         return num_weeks * seconds_in_week + extra_time 
 
     def update(self, current_step, traci):
-        for vid in self.get_vehicles_in_route():
+        for vid in traci.vehicle.getIDList():
             vehicle = self.db.vehicles[vid]
-            if vehicle.status == "in_route":
+            if vehicle is not None and vehicle.status == "in_route":
                 current_edge = traci.vehicle.getRoadID(vid)
                 curr_road = self.db.get_road(current_edge)
                 if curr_road is None:
@@ -975,8 +988,11 @@ class SimManager:
                 vehicle.current_x, vehicle.current_y = traci.vehicle.getPosition(vid)
                 vehicle.current_zone = curr_road.zone
                 
+                prev_road = self.db.get_road(vehicle.current_edge)
+                prev_edge = vehicle.current_edge
+
                 # only update vehicle in road for average road speed and density 
-                if(current_edge == vehicle.current_edge):
+                if(current_edge == prev_edge):
                     curr_road.add_vehicle_and_update(vehicle)
                 else:
                     # if vehicle changed road, update its state
@@ -984,7 +1000,6 @@ class SimManager:
                     # print(f"Vehicle {vehicle.id} changed road from {vehicle.current_edge} to {current_edge}.")
                 
                 # remove vehicle from previous Road and add to current Road
-                prev_road = self.db.get_road(vehicle.current_edge)
                 if prev_road is not None and prev_road != curr_road:
                     # print(f"Vehicle {vehicle.id} is moving from {vehicle.current_edge} to {current_edge}.")
                     self.log.info(f"Vehicle {vehicle.id} is moving from {vehicle.current_edge} to {current_edge}.")
@@ -1005,11 +1020,12 @@ class SimManager:
                
                 if current_edge == vehicle.destination_edge:
                     vehicle.status = "parked"
-                    vehicle.current_edge = vehicle.destinations[vehicle.destination_name]["edge"]
-                    vehicle.current_position = vehicle.destinations[vehicle.destination_name]["position"]
+                    vehicle.current_edge = vehicle.destination_edge
+                    vehicle.current_position = vehicle.destination_position
                     vehicle.route_length_left = 0
                     vehicle.destination_step = current_step
                     self.vehicles_in_route.remove(vid)
+                    curr_road.remove_vehicle_and_update(vehicle)
                     self.add_ground_truth_label(vehicle)
                     # print(f"Vehicle {vehicle.id} arrived at destination {vehicle.destination_name} at {self.convert_seconds_to_time(current_step)}.")
                     self.log.info(f"Vehicle {vehicle.id} arrived at destination {vehicle.destination_name} at {self.convert_seconds_to_time(current_step)}.")

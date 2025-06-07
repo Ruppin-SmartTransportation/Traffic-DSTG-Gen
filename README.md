@@ -181,6 +181,26 @@ print(data)
 
 ---
 
+
+## Novelty: Dynamic Graph Construction with Vehicle Nodes
+
+A key innovation of **Traffic-DSTG-Gen** is the representation of **dynamic traffic states as graphs where both junctions *and* vehicles are nodes**. Unlike traditional approaches—which typically only model junctions and road segments—our framework dynamically rewires the graph at each simulation step to reflect the actual positions of vehicles on the road network.
+
+- **Junctions** (blue nodes): Represent intersections in the traffic network.
+- **Vehicles** (orange nodes): Represent every vehicle currently active in the network.
+- **Static edges** (grey): Represent roads that currently have no vehicles on them.
+- **Dynamic edges** (red): For every road segment with vehicles, the edge is replaced by a *chain* of red edges connecting:
+    - The source junction to the first vehicle on the edge,
+    - Consecutive vehicles along the edge (ordered by position),
+    - The last vehicle to the destination junction.
+
+This graph snapshot visually demonstrates how the traffic graph changes with the real-time flow of vehicles, making it ideally suited for advanced **spatio-temporal graph neural network (STGNN) research**.
+
+![Dynamic Traffic Graph Example](tools/step_006120_graph.png)
+
+*Above: Example snapshot. Orange nodes = vehicles, blue nodes = junctions. Grey lines = empty roads; red chains = vehicle "convoys" on busy edges. Node labels indicate IDs.*
+
+
 ## Simulation Scenario: Three Urban Zones
 
 The provided `urban_three_zones.net.xml` network models a realistic city environment with:
