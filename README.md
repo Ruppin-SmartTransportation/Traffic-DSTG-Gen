@@ -89,22 +89,33 @@ traci==1.22.0
 
 ```
 Traffic-DSTG-Gen/
-│
-├── main.py                       # Main entry point for running graph generation
-├── requirements.txt              # All dependencies with pinned versions
-├── simulation.config.json        # Config for running scenarios
-├── graph/                        # Core graph and entity logic
-│   ├── __init__.py
-│   └── entities.py
-├── simulation/                   # SUMO scenarios, networks, and simulation data
-│   ├── urban_three_zones.net.xml     # Three-zone network definition
-│   ├── urban_three_zones.sumocfg     # SUMO config file
-│   ├── vehicle_types.add.xml
-│   ├── view_settings.xml
-│   └── ... (other scenario files)
-├── tools/                        # Data analysis and conversion utilities
-│   ├── EDA.py                    # Exploratory Data Analysis
-│   └── convert_to_pt.py          # Convert to PyTorch Geometric format
+├── main.py # Entrypoint: simulation control & graph generation
+├── simulation.config.json # Global config for zones, vehicles, intervals
+
+├── graph/
+│ ├── init.py
+│ └── entities.py # Classes for graph node/edge abstractions
+
+├── simulation/
+│ ├── init.py
+│ ├── *.txt # Zone-specific traffic sources (e.g., park1, stadium1)
+│ ├── *.net.xml, *.sumocfg # SUMO network & simulation configs
+│ ├── vehicle_types.add.xml # Vehicle type definitions
+│ └── view_settings.xml # SUMO GUI visual config
+
+├── tools/
+│ ├── convert_to_pt.py # Converts graph snapshots to PyG .pt format
+│ ├── create_labels_json.py # Label creation for supervised learning
+│ ├── EDA.py # Exploratory data analysis
+│ ├── pt_validation.py # Checks .pt output structure
+│ ├── visualize_graph.py # Graph snapshot visualization (e.g., NetworkX)
+│ ├── labels_.json # Label data (sampled)
+│ ├── step_.json/.png # Sample snapshot data and graph images
+│ └── demo.gif # Animated simulation demo
+
+├── eda_exports/ # EDA outputs (generated during analysis)
+├── logs/ # Logs from SUMO or run-time
+├── requirements.txt
 ├── LICENSE
 ├── README.md
 └── .gitignore
