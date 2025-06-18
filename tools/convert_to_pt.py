@@ -1,505 +1,323 @@
-import torch
-from torch_geometric.data import Data
-import json
 import os
-import random
+import json
+import torch
+import pandas as pd
+import numpy as np
+import ast
 import argparse
+from torch_geometric.data import Data
+from tqdm import tqdm
 
-def extract_nodes(node_list):
-    """
-    Converts list of node dictionaries to:
-    - node_id_map: mapping node_id -> index
-    - node_features: torch tensor for all nodes (vehicles and junctions)
-    - node_types: torch tensor for node types (vehicle/junction)
-    - node_positions: torch tensor of node coordinates (for visualization)
-    """
+# =======================
+# Utility: Extract EDA stats & mappings
+# =======================
+def extract_stats_and_mappings(
+    vehicle_csv_path,
+    junction_csv_path,
+    edge_csv_path
+):
+    def parse_counts(val):
+        try:
+            if pd.isna(val) or val == '':
+                return {}
+            return ast.literal_eval(val)
+        except Exception:
+            return {}
 
-    node_id_map = {}
-    node_features = []
-    node_types = []
-    node_positions = []
+    feature_stats = {'vehicle': {}, 'junction': {}, 'edge': {}}
 
-    # Build a sample vehicle feature list to get the correct length
-    sample_vehicle_feats = [
-        1,  # is_vehicle (flag)
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,    # speed, acceleration, length, width, height, current_x, current_y
-        0.0, 0.0, 0.0,                       # current zone one-hot
-        0.0, 0.0, 0.0,                       # origin zone one-hot
-        0.0, 0.0, 0.0,                       # destination zone one-hot
-        0.0, 0.0, 0.0,                       # vehicle type one-hot
-        0.0,                                 # route_length
-        0.0,                                 # percent route left
-        0.0,                                 # origin_start_sec
-        0.0, 0.0, 0.0,                       # origin_position, origin_x, origin_y
-        0.0, 0.0, 0.0,                       # destination_position, destination_x, destination_y
-    ]
-    NUM_FEATURES = len(sample_vehicle_feats)
+    def process_csv(path, group):
+        df = pd.read_csv(path)
+        for _, row in df.iterrows():
+            feat = row['feature']
+            entry = {}
+            if row['type'] == 'numeric':
+                entry['mean'] = float(row.get('mean', 0.0))
+                entry['std'] = float(row.get('std', 1.0)) if float(row.get('std', 1.0)) > 0 else 1.0
+            # Always create mapping for 'length' in vehicles as categorical!
+            if (group == 'vehicle' and feat == 'length'):
+                counts = parse_counts(row.get('value_counts', ''))
+                if counts:
+                    vals = sorted(float(k) for k in counts.keys())
+                else:
+                    vals = sorted(set([
+                        float(row['min']),
+                        float(row['max']),
+                        float(row['25%']),
+                        float(row['median']),
+                        float(row['75%'])
+                    ]))
+                entry['mapping'] = {v: i for i, v in enumerate(vals)}
+            elif row['type'] == 'categorical':
+                counts = parse_counts(row.get('value_counts', ''))
+                vals = sorted(counts.keys()) if counts else []
+                entry['mapping'] = {v: i for i, v in enumerate(vals)}
+            feature_stats[group][feat] = entry
 
-    for idx, node in enumerate(node_list):
-        node_id_map[node['id']] = idx
+    process_csv(vehicle_csv_path, 'vehicle')
+    process_csv(junction_csv_path, 'junction')
+    process_csv(edge_csv_path, 'edge')
+    return feature_stats
 
-        if node['node_type'] == 1:  # Vehicle
-            feats = [
-                1,  # is_vehicle (flag)
-                node.get('speed', 0.0),
-                node.get('acceleration', 0.0),
-                node.get('length', 0.0),
-                node.get('width', 0.0),
-                node.get('height', 0.0),
-                node.get('current_x', 0.0),
-                node.get('current_y', 0.0),
-                # Current zone one-hot
-                float(node.get('current_zone', 'A') == 'A'),
-                float(node.get('current_zone', 'B') == 'B'),
-                float(node.get('current_zone', 'C') == 'C'),
-                # Origin zone one-hot
-                float(node.get('origin_zone', 'A') == 'A'),
-                float(node.get('origin_zone', 'B') == 'B'),
-                float(node.get('origin_zone', 'C') == 'C'),
-                # Destination zone one-hot
-                float(node.get('destination_zone', 'A') == 'A'),
-                float(node.get('destination_zone', 'B') == 'B'),
-                float(node.get('destination_zone', 'C') == 'C'),
-                # Vehicle type one-hot
-                float(node.get('vehicle_type', 'passenger') == 'passenger'),
-                float(node.get('vehicle_type', '') == 'truck'),
-                float(node.get('vehicle_type', '') == 'bus'),
-                # Trip info
-                node.get('route_length', 0.0),  # total trip distance (meters)
-                (node.get('route_length_left', 0.0) / node.get('route_length', 1.0)) if node.get('route_length', 1.0) > 0 else 0.0,  # percent of route left
-                node.get('origin_start_sec', 0.0),
-                node.get('origin_position', 0.0),
-                float(node.get('origin_x', 0.0) or 0.0),
-                float(node.get('origin_y', 0.0) or 0.0),
-                node.get('destination_position', 0.0),
-                float(node.get('destination_x', 0.0) or 0.0),
-                float(node.get('destination_y', 0.0) or 0.0),
-            ]
-        else:  # Junction
-            feats = [
-                0,  # is_vehicle (flag)
-                float(node.get('zone', 'A') == 'A'),
-                float(node.get('zone', 'B') == 'B'),
-                float(node.get('zone', 'C') == 'C'),
-                # Junction type one-hot (only traffic_light and priority)
-                float(node.get('type', '') == 'traffic_light'),
-                float(node.get('type', '') == 'priority'),
-                len(node.get('incoming', [])),
-                len(node.get('outgoing', [])),
-                node.get('x', 0.0),
-                node.get('y', 0.0),
-            ]
-            # Pad the junction features with zeros to match NUM_FEATURES
-            while len(feats) < NUM_FEATURES:
-                feats.append(0.0)
-
-        # Optional: debug assertion
-        assert len(feats) == NUM_FEATURES, f"Feature length mismatch: {len(feats)} != {NUM_FEATURES}"
-
-        if node['node_type'] == 1:
-            x = node.get('current_x', 0.0)
-            y = node.get('current_y', 0.0)
-        else:
-            x = node.get('x', 0.0)
-            y = node.get('y', 0.0)
-
-        node_features.append(feats)
-        node_types.append(node['node_type'])
-        node_positions.append([x, y])
-
-    node_features = torch.tensor(node_features, dtype=torch.float)
-    node_types = torch.tensor(node_types, dtype=torch.long)
-    node_positions = torch.tensor(node_positions, dtype=torch.float)
-
-    return node_id_map, node_features, node_types, node_positions
-
-def extract_edges(node_list, edge_list, node_id_map):
-    """
-    Builds edge_index and edge_attr (edge features) for PyTorch Geometric.
-    - node_list: list of node dicts
-    - edge_list: list of edge dicts (from snapshot['edges'])
-    - node_id_map: mapping from node_id to integer index
-    Returns: (edge_index, edge_attr)
-    """
-
-    edge_index = []
-    edge_attr = []
-
-    # Step 1: Calculate future vehicle count for each edge
-    future_vehicle_counts = {}
-    vehicle_nodes = [node for node in node_list if node['node_type'] == 1]
-    for edge in edge_list:
-        eid = edge['id']
-        future_vehicle_counts[eid] = sum(
-            1 for veh in vehicle_nodes if eid in veh.get('route_left', [])
-        )
-
-    # Step 2: Build edge features
-    for edge in edge_list:
-        src_id = edge['from']
-        tgt_id = edge['to']
-        if src_id not in node_id_map or tgt_id not in node_id_map:
-            continue
-        edge_index.append([node_id_map[src_id], node_id_map[tgt_id]])
-        # One-hot encode zone if present (A, B, C)
-        zone = edge.get('zone', 'A')
-        zone_A = float(zone == 'A')
-        zone_B = float(zone == 'B')
-        zone_C = float(zone == 'C')
-        # Edge features: [density, avg_speed, future_vehicle_count, num_lanes, length, zone_A, zone_B, zone_C]
-        edge_feat = [
-            edge.get('density', 0.0),
-            edge.get('average_speed', 0.0),
-            future_vehicle_counts.get(edge['id'], 0.0),
-            edge.get('num_lanes', 1.0),      # default to 1 lane if missing
-            edge.get('length', 0.0),         # meters
-            zone_A,
-            zone_B,
-            zone_C
+# =======================
+# Feature Vector Layout
+# =======================
+def get_feature_layout(stats):
+    n_length = len(stats['vehicle']['length']['mapping'])
+    n_zone = len(stats['vehicle']['current_zone']['mapping'])
+    n_type = len(stats['junction']['type']['mapping']) if 'type' in stats['junction'] else 0
+    layout = {
+        'n_length': n_length,
+        'n_zone': n_zone,
+        'n_type': n_type,
+        'vehicle':  [
+            'node_type', 'length_oh', 'speed', 'acceleration', 'current_x', 'current_y', 'zone_oh',
+            'edge_idx', 'current_position', 'sin_hour', 'cos_hour', 'route_length', 'route_length_left', 'type_oh'
+        ],
+        'junction': [
+            'node_type', 'length_oh', 'speed', 'acceleration', 'current_x', 'current_y', 'zone_oh',
+            'edge_idx', 'current_position', 'sin_hour', 'cos_hour', 'route_length', 'route_length_left', 'type_oh'
         ]
-        edge_attr.append(edge_feat)
-
-    # Convert to PyTorch tensors
-    if len(edge_index) == 0:
-        edge_index = torch.empty((2, 0), dtype=torch.long)
-        edge_attr = torch.empty((0, 8), dtype=torch.float)
-    else:
-        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
-        edge_attr = torch.tensor(edge_attr, dtype=torch.float)
-
-    return edge_index, edge_attr
-
-def load_and_inspect_snapshot(json_path):
-    """Load a snapshot JSON file and print a brief summary."""
-    with open(json_path, "r") as f:
-        data = json.load(f)
-
-    print(f"Keys in snapshot: {list(data.keys())}")
-    print(f"Number of nodes: {len(data['nodes'])}")
-    print("First node example:")
-    print(data['nodes'][0])  # Show first node for schema inspection
-
-    return data  # So you can use it in other functions
-
-def convert_snapshot_to_pyg(snapshot):
-    """
-    Converts a single snapshot (dict) to a PyTorch Geometric Data object.
-    """
-    # Extract nodes and node features
-    node_id_map, node_features, node_types, node_positions = extract_nodes(snapshot['nodes'])
-
-    # Extract edges and edge features
-    edge_index, edge_attr = extract_edges(snapshot['nodes'], snapshot['edges'], node_id_map)
-
-    # Package into a PyTorch Geometric Data object
-    pyg_data = Data(
-        x=node_features,          # Node features [num_nodes, num_node_features]
-        edge_index=edge_index,    # [2, num_edges]
-        edge_attr=edge_attr,      # [num_edges, num_edge_features]
-        pos=node_positions,       # [num_nodes, 2] for visualization
-        node_types=node_types     # [num_nodes] 0=junction, 1=vehicle
-        # Add more fields as needed
+    }
+    feature_dim = (
+        1 + n_length + 4 + n_zone + 1 + 1 + 2 + 2 + n_type
     )
+    return layout, feature_dim
 
-    return pyg_data
-
-
-def compute_eta(vehicle, snapshot_time, gt_entry):
-    """Compute ETA for a single vehicle at this snapshot."""
-    veh_id = vehicle['id']
-    start_time = vehicle.get('origin_start_sec', None)
-    arrival_time = gt_entry.get(veh_id, None)
-    if start_time is None or arrival_time is None:
-        return float('nan')  # or any flag value
-    # "Current elapsed" is (snapshot_time - start_time)
-    eta = arrival_time - (snapshot_time - start_time)
-    if eta < 0:
-        eta = 0.0
-    return eta
-
-def build_label_tensor(snapshot, gt_dict):
+# =======================
+# Compute edge route demand
+# =======================
+def compute_edge_route_counts(vehicle_nodes):
     """
-    Returns a tensor where label[i] = ETA for vehicle i,
-    NaN for junction nodes.
+    Returns a dict mapping edge_id -> number of vehicles whose route_left includes edge_id.
     """
-    num_nodes = len(snapshot['nodes'])
-    etas = torch.full((num_nodes,), float('nan'))  # initialize all to nan
-    for idx, node in enumerate(snapshot['nodes']):
-        if node['node_type'] == 1:
-            veh_id = node['id']
-            start_time = node.get('origin_start_sec', None)
-            arrival_time = gt_dict.get(veh_id, {}).get('destination_time_sec', None)
-            snapshot_time = snapshot['step']
-            if start_time is not None and arrival_time is not None:
-                eta = arrival_time - snapshot_time
-                # (optional: clamp negative values to zero)
-                if eta < 0:
-                    eta = 0.0
-                etas[idx] = eta
-    return etas
+    edge_route_counts = {}
+    for node in vehicle_nodes:
+        route_left = node.get("route_left", [])
+        for eid in route_left:
+            edge_route_counts[eid] = edge_route_counts.get(eid, 0) + 1
+    return edge_route_counts
 
+# =======================
+# Processing Functions
+# =======================
+def process_vehicle_nodes(vehicle_nodes, stats, feature_dim):
+    vstats = stats['vehicle']
+    length_map = vstats['length']['mapping']
+    zone_map = vstats['current_zone']['mapping']
+    edge_map = stats['edge']['id']['mapping']
 
-def validate_snapshots(snapshot_dir, percent=0.1, num_print_vehicles=5, verbose=True):
-    """
-    Randomly samples and validates a percent of snapshot json/pt/label triplets in a directory.
+    n_length = len(length_map)
+    n_zone = len(zone_map)
+    n_type = len(stats['junction']['type']['mapping']) if 'type' in stats['junction'] else 0
 
-    Args:
-        snapshot_dir (str): Directory with .json, .pt, and _labels.pt files
-        percent (float): Fraction of files to validate (e.g. 0.1 = 10%)
-        num_print_vehicles (int): How many vehicles per file to print info for
-        verbose (bool): Whether to print detailed results
+    features = []
+    route_indices = []
+    vehicle_ids = []
 
-    Returns:
-        None (prints validation info)
-    """
-    snapshot_files = [f for f in os.listdir(snapshot_dir) if f.endswith('.json')]
-    snapshot_files.sort()
-    num_to_validate = max(1, int(len(snapshot_files) * percent))
-    sampled_files = random.sample(snapshot_files, num_to_validate)
+    for node in vehicle_nodes:
+        feat = []
+        feat.append(1)
+        length_oh = [0] * n_length
+        lval = float(node.get("length", 0.0))
+        if lval in length_map:
+            length_oh[length_map[lval]] = 1
+        feat.extend(length_oh)
+        for key in ['speed', 'acceleration', 'current_x', 'current_y']:
+            mean = vstats[key]['mean']
+            std = vstats[key]['std']
+            value = (node.get(key, 0.0) - mean) / std
+            feat.append(value)
+        zone_oh = [0] * n_zone
+        zval = node.get("current_zone")
+        if zval in zone_map:
+            zone_oh[zone_map[zval]] = 1
+        feat.extend(zone_oh)
+        edge_idx = edge_map.get(node.get("current_edge"), 0)
+        feat.append(edge_idx)
+        mean = vstats['current_position']['mean']
+        std = vstats['current_position']['std']
+        curr_pos = (node.get("current_position", 0.0) - mean) / std
+        feat.append(curr_pos)
+        origin_start_sec = node.get("origin_start_sec", 0.0)
+        hour = ((origin_start_sec // 3600) % 24) if origin_start_sec > 0 else 0
+        sin_hour = np.sin(2 * np.pi * hour / 24)
+        cos_hour = np.cos(2 * np.pi * hour / 24)
+        feat.extend([sin_hour, cos_hour])
+        for key in ['route_length', 'route_length_left']:
+            mean = vstats[key]['mean']
+            std = vstats[key]['std']
+            value = (node.get(key, 0.0) - mean) / std
+            feat.append(value)
+        feat.extend([0] * n_type)
+        if len(feat) < feature_dim:
+            feat += [0] * (feature_dim - len(feat))
+        elif len(feat) > feature_dim:
+            feat = feat[:feature_dim]
+        features.append(feat)
+        edge_map = stats['edge']['id']['mapping']
+        route_raw = node.get("route", [])
+        route_idx_list = [edge_map.get(eid, 0) for eid in route_raw]
+        route_indices.append(route_idx_list)
+        vehicle_ids.append(node.get("id"))
+    return torch.FloatTensor(features), route_indices, vehicle_ids
 
-    print(f"Validating {len(sampled_files)} of {len(snapshot_files)} snapshots ({100*len(sampled_files)/len(snapshot_files):.1f}%)")
+def process_junction_nodes(junction_nodes, stats, feature_dim):
+    jstats = stats['junction']
+    zone_map = jstats['zone']['mapping'] if 'zone' in jstats and 'mapping' in jstats['zone'] else {}
+    type_map = jstats['type']['mapping'] if 'type' in jstats and 'mapping' in jstats['type'] else {}
 
-    for fname in sampled_files:
-        stem = os.path.splitext(fname)[0]
-        pt_path = os.path.join(snapshot_dir, f"{stem}.pt")
-        label_path = os.path.join(snapshot_dir, f"{stem}_labels.pt")
-        json_path = os.path.join(snapshot_dir, fname)
+    n_length = len(stats['vehicle']['length']['mapping'])
+    n_zone = len(zone_map)
+    n_type = len(type_map)
 
-        # Check files exist
-        if not (os.path.exists(pt_path) and os.path.exists(label_path)):
-            print(f"[WARNING] Missing .pt or label file for {fname}, skipping.")
-            continue
+    features = []
+    junction_ids = []
 
-        # Load files
-        with open(json_path, "r") as f:
-            snapshot = json.load(f)
-        pyg_data = torch.load(pt_path)
-        eta_tensor = torch.load(label_path)
+    for node in junction_nodes:
+        feat = []
+        feat.append(0)
+        feat.extend([0] * n_length)
+        feat.extend([0, 0, 0, 0])
+        zone_oh = [0] * n_zone
+        zval = node.get("zone")
+        if zval in zone_map:
+            zone_oh[zone_map[zval]] = 1
+        feat.extend(zone_oh)
+        feat.append(0)
+        feat.append(0)
+        feat.extend([0, 0])
+        feat.extend([0, 0])
+        type_oh = [0] * n_type
+        tval = node.get("type")
+        if tval in type_map:
+            type_oh[type_map[tval]] = 1
+        feat.extend(type_oh)
+        if len(feat) < feature_dim:
+            feat += [0] * (feature_dim - len(feat))
+        elif len(feat) > feature_dim:
+            feat = feat[:feature_dim]
+        features.append(feat)
+        junction_ids.append(node.get("id"))
+    return torch.FloatTensor(features), junction_ids
 
-        # Node count check
-        if len(snapshot['nodes']) != pyg_data.x.shape[0]:
-            print(f"[ERROR] Node count mismatch in {fname}: JSON {len(snapshot['nodes'])}, PT {pyg_data.x.shape[0]}")
-        else:
-            if verbose:
-                print(f"[OK] {fname}: node count matches ({len(snapshot['nodes'])})")
+def process_edge_entities(edge_list, stats, edge_route_counts):
+    estats = stats['edge']
+    features = []
+    edge_ids = []
+    for edge in edge_list:
+        length = (edge.get("length", 0.0) - estats['length']['mean']) / estats['length']['std'] if 'length' in estats else 0.0
+        speed = (edge.get("speed", 0.0) - estats['speed']['mean']) / estats['speed']['std'] if 'speed' in estats else 0.0
+        count = edge_route_counts.get(edge.get("id"), 0)
+        feat = [length, speed, float(count)]
+        edge_ids.append(edge.get("id"))
+        features.append(feat)
+    return torch.FloatTensor(features), edge_ids
 
-        # Edge count check
-        if 'edges' in snapshot:
-            num_edges_json = len(snapshot['edges'])
-            num_edges_pt = pyg_data.edge_index.shape[1]
-            if num_edges_json != num_edges_pt:
-                print(f"    [ERROR] Edge count mismatch: json {num_edges_json}, pt {num_edges_pt}")
-            elif verbose:
-                print(f"    [OK] edge count matches ({num_edges_json})")
+def process_labels(label_list):
+    label_map = {d['vehicle_id']: d['eta'] for d in label_list}
+    return label_map
 
-        # Vehicle ETA check
-        if verbose:
-            count_checked = 0
-            for i, node in enumerate(snapshot['nodes']):
-                if node['node_type'] == 1:
-                    eta = eta_tensor[i].item()
-                    print(f"    Vehicle {node['id']} index {i} ETA = {eta}")
-                    count_checked += 1
-                    if count_checked >= num_print_vehicles:
-                        break
+# =======================
+# Main conversion logic
+# =======================
+def convert_snapshot(snapshot_path, label_path, out_graph_path, stats, feature_dim):
+    with open(snapshot_path, 'r') as f:
+        snapshot = json.load(f)
+    with open(label_path, 'r') as f:
+        labels = json.load(f)
 
-    print("Validation complete.")
+    vehicle_nodes = [n for n in snapshot.get("nodes", []) if n.get("node_type") == 1]
+    junction_nodes = [n for n in snapshot.get("nodes", []) if n.get("node_type") == 0]
+    edges = snapshot.get("edges", [])
 
-def check_snapshot_labels(snapshot, gt_data, label_tensor, max_vehicles=10, only_print_errors=False):
-    """
-    For each vehicle in the snapshot, print:
-    - vehicle_id, arrival_time, snapshot_time, computed_eta, label_eta, diff
-    If only_print_errors=True, print only if diff > 1e-4
-    """
-    errors_found = 0
-    n_printed = 0
-    for idx, node in enumerate(snapshot['nodes']):
-        if node['node_type'] == 1:
-            veh_id = node['id']
-            arrival_time = gt_data.get(veh_id, {}).get('destination_time_sec', None)
-            snapshot_time = snapshot['step']
-            if arrival_time is not None:
-                computed_eta = arrival_time - snapshot_time
-                label_eta = label_tensor[idx].item()
-                diff = abs(label_eta - computed_eta)
-                if only_print_errors and diff < 1e-4:
-                    continue
-                print(f"veh_id: {veh_id}, arrival: {arrival_time}, snapshot: {snapshot_time}, "
-                      f"computed_eta: {computed_eta}, label_eta: {label_eta}, diff: {diff}")
-                if diff >= 1e-4:
-                    errors_found += 1
-            else:
-                print(f"veh_id: {veh_id}, arrival_time not found in GT.")
-                errors_found += 1
-            n_printed += 1
-            if n_printed >= max_vehicles and not only_print_errors:
-                break
-    return errors_found
+    # Compute edge route counts using route_left!
+    edge_route_counts = compute_edge_route_counts(vehicle_nodes)
 
-def check_all_snapshot_labels(snapshot_dir, gt_path, max_snapshots=10, max_vehicles=10, only_print_errors=False):
-    """
-    For each snapshot in snapshot_dir, compare computed ETA to label_tensor.
-    """
-    # Load ground truth once
-    with open(gt_path, "r") as f:
-        gt_data = json.load(f)
-    # Find all json snapshot files
-    files = [f for f in os.listdir(snapshot_dir) if f.endswith('.json')]
-    files.sort()
-    total_errors = 0
-    n_checked = 0
-    for fname in files:
-        stem = os.path.splitext(fname)[0]
-        json_path = os.path.join(snapshot_dir, fname)
-        label_path = os.path.join(snapshot_dir, f"{stem}_labels.pt")
-        if not os.path.exists(label_path):
-            print(f"[WARNING] Missing label file for {fname}, skipping.")
-            continue
-        with open(json_path, "r") as f:
-            snapshot = json.load(f)
-        label_tensor = torch.load(label_path)
-        print(f"\n=== {fname} ===")
-        errors = check_snapshot_labels(
-            snapshot, gt_data, label_tensor, max_vehicles=max_vehicles, only_print_errors=only_print_errors
-        )
-        if errors > 0:
-            print(f"  [ERROR] Found {errors} mismatches in {fname}")
-        n_checked += 1
-        if n_checked >= max_snapshots:
-            break
-    print(f"\nChecked {n_checked} snapshots. Done.")
+    v_feats, v_route_indices, vehicle_ids = process_vehicle_nodes(vehicle_nodes, stats, feature_dim)
+    j_feats, junction_ids = process_junction_nodes(junction_nodes, stats, feature_dim)
+    e_feats, edge_ids = process_edge_entities(edges, stats, edge_route_counts)
+    label_map = process_labels(labels)
 
-import os
-import json
-import torch
+    # Combine node features
+    all_node_feats = torch.cat([v_feats, j_feats], dim=0)
+    all_node_ids = vehicle_ids + junction_ids
 
-def track_vehicles_over_time(snapshot_dir, gt_path, num_snapshots=10, max_vehicles=10):
-    """
-    Track vehicles from the first snapshot through num_snapshots.
-    Print ETA trajectory and check that ETA does not increase.
-    """
-    # Load ground truth
-    with open(gt_path, "r") as f:
-        gt_data = json.load(f)
+    node_id_to_idx = {nid: idx for idx, nid in enumerate(all_node_ids)}
+    edge_index = []
+    for edge in edges:
+        src_id = edge.get('from')
+        tgt_id = edge.get('to')
+        if src_id in node_id_to_idx and tgt_id in node_id_to_idx:
+            edge_index.append([node_id_to_idx[src_id], node_id_to_idx[tgt_id]])
+    if edge_index:
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+    else:
+        edge_index = torch.empty((2, 0), dtype=torch.long)
+    edge_attrs = e_feats
 
-    # Get sorted list of snapshot files
-    files = [f for f in os.listdir(snapshot_dir) if f.startswith('step_') and f.endswith('.json')]
-    files.sort()
-    files = files[:num_snapshots]  # Only check first N snapshots
+    label_tensor = torch.FloatTensor([label_map.get(vid, -1) for vid in vehicle_ids])
 
-    # Load the first snapshot and label tensor
-    first_json_path = os.path.join(snapshot_dir, files[0])
-    first_label_path = os.path.join(snapshot_dir, files[0].replace('.json', '_labels.pt'))
-    with open(first_json_path, "r") as f:
-        first_snapshot = json.load(f)
-    first_labels = torch.load(first_label_path)
+    data = Data(
+        x=all_node_feats,
+        edge_index=edge_index,
+        edge_attr=edge_attrs,
+        y=label_tensor,
+        vehicle_ids=vehicle_ids,
+        junction_ids=junction_ids,
+        edge_ids=edge_ids,
+        vehicle_routes=v_route_indices
+    )
+    torch.save(data, out_graph_path)
 
-    # Build vehicle list from first snapshot (limit to max_vehicles)
-    tracked_vehicles = []
-    for idx, node in enumerate(first_snapshot['nodes']):
-        if node['node_type'] == 1:
-            veh_id = node['id']
-            eta = first_labels[idx].item()
-            tracked_vehicles.append((veh_id, eta))
-            if len(tracked_vehicles) >= max_vehicles:
-                break
-
-    print(f"Tracking {len(tracked_vehicles)} vehicles across {len(files)} snapshots...\n")
-
-    # For each vehicle, collect its ETA in each snapshot
-    vehicle_etas = {veh_id: [] for veh_id, _ in tracked_vehicles}
-
-    for snap_idx, fname in enumerate(files):
-        json_path = os.path.join(snapshot_dir, fname)
-        label_path = os.path.join(snapshot_dir, fname.replace('.json', '_labels.pt'))
-        with open(json_path, "r") as f:
-            snapshot = json.load(f)
-        labels = torch.load(label_path)
-        node_id_map = {node['id']: idx for idx, node in enumerate(snapshot['nodes'])}
-
-        for veh_id in vehicle_etas.keys():
-            if veh_id in node_id_map:
-                idx = node_id_map[veh_id]
-                eta = labels[idx].item()
-                vehicle_etas[veh_id].append((snap_idx, eta))
-            else:
-                vehicle_etas[veh_id].append((snap_idx, None))
-
-    # Validate monotonic decrease of ETA
-    for veh_id, traj in vehicle_etas.items():
-        print(f"\nVehicle {veh_id}:")
-        prev_eta = None
-        for snap_idx, eta in traj:
-            if eta is not None:
-                print(f"  Snapshot {snap_idx}: ETA = {eta}")
-                if prev_eta is not None and eta > prev_eta + 1e-4:  # small tolerance
-                    print(f"    [WARNING] ETA increased! Previous: {prev_eta}, Now: {eta}")
-                prev_eta = eta
-            else:
-                print(f"  Snapshot {snap_idx}: Vehicle not present")
-
-
+# =======================
+# Main script
+# =======================
 def main():
-    parser = argparse.ArgumentParser(description="Convert simulation snapshots to PyTorch Geometric datasets.")
-    parser.add_argument('--input', type=str, required=True,
-                        help="Input directory containing simulation snapshot JSON files.")
-    parser.add_argument('--output', type=str, default=None,
-                        help="(Optional) Output file to save merged PyTorch Geometric dataset (.pt).")
-    parser.add_argument('--gt', type=str, default=None,
-                        help="Path to ground truth JSON file. If not provided, will look for 'ground_truth.json' in input dir.")
+    parser = argparse.ArgumentParser(description="Convert traffic snapshots and labels to .pt files for GNN training")
+    parser.add_argument(
+        "--snapshots_folder",
+        type=str,
+        default="/media/guy/StorageVolume/traffic_data",
+        help="Folder with snapshot JSON files"
+    )
+    parser.add_argument(
+        "--labels_folder",
+        type=str,
+        default="/media/guy/StorageVolume/traffic_data/labels",
+        help="Folder with per-snapshot label JSON files"
+    )
+    parser.add_argument(
+        "--eda_folder",
+        type=str,
+        default="eda_exports",
+        help="Folder with feature summary CSVs"
+    )
+    parser.add_argument(
+        "--out_graph_folder",
+        type=str,
+        default="/media/guy/StorageVolume/traffic_data_pt",
+        help="Output folder for .pt graph files"
+    )
     args = parser.parse_args()
 
-    snapshot_dir = args.input
-    output_path = args.output
-    gt_path = args.gt or os.path.join(snapshot_dir, "ground_truth.json")
+    os.makedirs(args.out_graph_folder, exist_ok=True)
 
-    # 1. Load ground truth file ONCE
-    if not os.path.exists(gt_path):
-        print(f"[ERROR] Ground truth file not found: {gt_path}")
-        return
-    with open(gt_path, "r") as f:
-        gt_data = json.load(f)  # {veh_id: {arrival_time: int, ...}, ...}
+    vehicle_csv = os.path.join(args.eda_folder, "vehicle_feature_summary.csv")
+    junction_csv = os.path.join(args.eda_folder, "junction_feature_summary.csv")
+    edge_csv = os.path.join(args.eda_folder, "edge_feature_summary.csv")
+    stats = extract_stats_and_mappings(vehicle_csv, junction_csv, edge_csv)
+    layout, feature_dim = get_feature_layout(stats)
 
-    # 2. Go over all snapshot files
-    files = [f for f in os.listdir(snapshot_dir) if f.endswith('.json')]
-    files.sort()  # sort for reproducibility
-    all_pyg = []
-    all_labels = []
-    for fname in files:
-        json_path = os.path.join(snapshot_dir, fname)
-        with open(json_path, 'r') as f:
-            snapshot = json.load(f)
-        node_id_map, _, _, _ = extract_nodes(snapshot['nodes'])  
-        pyg_data = convert_snapshot_to_pyg(snapshot)
-        label_tensor = build_label_tensor(snapshot, gt_data)
-        stem = os.path.splitext(fname)[0]
-        # Save per-snapshot files
-        torch.save(pyg_data, os.path.join(snapshot_dir, f"{stem}.pt"))
-        torch.save(label_tensor, os.path.join(snapshot_dir, f"{stem}_labels.pt"))
-        print(f"Processed: {fname}")
-        # Optionally: merge for output
-        all_pyg.append(pyg_data)
-        all_labels.append(label_tensor)
+    snapshot_files = sorted([f for f in os.listdir(args.snapshots_folder) if f.endswith('.json') and "labels" not in f])
 
-    if output_path is not None:
-        torch.save({"graphs": all_pyg, "labels": all_labels}, output_path)
-        print(f"Saved merged dataset to {output_path}")
-
-    # Optionally: validate and track
-    validate_snapshots(snapshot_dir, percent=0.1)
-    track_vehicles_over_time(
-        snapshot_dir=snapshot_dir,
-        gt_path=gt_path,
-        num_snapshots=20,
-        max_vehicles=5
-    )
-    check_all_snapshot_labels(
-        snapshot_dir=snapshot_dir,
-        gt_path=gt_path,
-        max_snapshots=5,
-        max_vehicles=10,
-        only_print_errors=False
-    )
+    print(f"Converting {len(snapshot_files)} snapshots to PyG Data objects...")
+    for snap_file in tqdm(snapshot_files, desc="Processing snapshots"):
+        snapshot_path = os.path.join(args.snapshots_folder, snap_file)
+        label_file = snap_file.replace("step_", "labels_")
+        label_path = os.path.join(args.labels_folder, label_file)
+        out_graph_path = os.path.join(args.out_graph_folder, snap_file.replace(".json", ".pt"))
+        convert_snapshot(snapshot_path, label_path, out_graph_path, stats, feature_dim)
 
 if __name__ == "__main__":
     main()

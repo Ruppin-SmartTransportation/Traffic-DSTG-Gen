@@ -1,0 +1,261 @@
+[
+  {
+    "vehicle_id": "veh_16874",
+    "origin_time_sec": 1021,
+    "destination_time_sec": 1445,
+    "total_travel_time_seconds": 424,
+    "eta": 246
+  },
+  {
+    "vehicle_id": "veh_26603",
+    "origin_time_sec": 1141,
+    "destination_time_sec": 1908,
+    "total_travel_time_seconds": 767,
+    "eta": 709
+  },
+  {
+    "vehicle_id": "veh_27025",
+    "origin_time_sec": 1201,
+    "destination_time_sec": 1749,
+    "total_travel_time_seconds": 548,
+    "eta": 550
+  },
+  {
+    "vehicle_id": "veh_28227",
+    "origin_time_sec": 901,
+    "destination_time_sec": 1669,
+    "total_travel_time_seconds": 768,
+    "eta": 470
+  },
+  {
+    "vehicle_id": "veh_36972",
+    "origin_time_sec": 601,
+    "destination_time_sec": 1495,
+    "total_travel_time_seconds": 894,
+    "eta": 296
+  },
+  {
+    "vehicle_id": "veh_38907",
+    "origin_time_sec": 781,
+    "destination_time_sec": 1542,
+    "total_travel_time_seconds": 761,
+    "eta": 343
+  },
+  {
+    "vehicle_id": "veh_60843",
+    "origin_time_sec": 541,
+    "destination_time_sec": 1452,
+    "total_travel_time_seconds": 911,
+    "eta": 253
+  },
+  {
+    "vehicle_id": "veh_69549",
+    "origin_time_sec": 301,
+    "destination_time_sec": 1316,
+    "total_travel_time_seconds": 1015,
+    "eta": 117
+  },
+  {
+    "vehicle_id": "veh_89160",
+    "origin_time_sec": 961,
+    "destination_time_sec": 1939,
+    "total_travel_time_seconds": 978,
+    "eta": 740
+  },
+  {
+    "vehicle_id": "veh_101443",
+    "origin_time_sec": 841,
+    "destination_time_sec": 1765,
+    "total_travel_time_seconds": 924,
+    "eta": 566
+  },
+  {
+    "vehicle_id": "veh_102683",
+    "origin_time_sec": 721,
+    "destination_time_sec": 1423,
+    "total_travel_time_seconds": 702,
+    "eta": 224
+  },
+  {
+    "vehicle_id": "veh_112388",
+    "origin_time_sec": 1081,
+    "destination_time_sec": 1414,
+    "total_travel_time_seconds": 333,
+    "eta": 215
+  },
+  {
+    "vehicle_id": "veh_113858",
+    "origin_time_sec": 1201,
+    "destination_time_sec": 1872,
+    "total_travel_time_seconds": 671,
+    "eta": 673
+  },
+  {
+    "vehicle_id": "veh_119132",
+    "origin_time_sec": 961,
+    "destination_time_sec": 1968,
+    "total_travel_time_seconds": 1007,
+    "eta": 769
+  },
+  {
+    "vehicle_id": "veh_120659",
+    "origin_time_sec": 721,
+    "destination_time_sec": 1388,
+    "total_travel_time_seconds": 667,
+    "eta": 189
+  },
+  {
+    "vehicle_id": "veh_121901",
+    "origin_time_sec": 541,
+    "destination_time_sec": 1333,
+    "total_travel_time_seconds": 792,
+    "eta": 134
+  },
+  {
+    "vehicle_id": "veh_122254",
+    "origin_time_sec": 241,
+    "destination_time_sec": 1507,
+    "total_travel_time_seconds": 1266,
+    "eta": 308
+  },
+  {
+    "vehicle_id": "veh_125604",
+    "origin_time_sec": 481,
+    "destination_time_sec": 1353,
+    "total_travel_time_seconds": 872,
+    "eta": 154
+  },
+  {
+    "vehicle_id": "veh_129230",
+    "origin_time_sec": 841,
+    "destination_time_sec": 1566,
+    "total_travel_time_seconds": 725,
+    "eta": 367
+  },
+  {
+    "vehicle_id": "veh_135625",
+    "origin_time_sec": 661,
+    "destination_time_sec": 1252,
+    "total_travel_time_seconds": 591,
+    "eta": 53
+  },
+  {
+    "vehicle_id": "veh_136549",
+    "origin_time_sec": 901,
+    "destination_time_sec": 2018,
+    "total_travel_time_seconds": 1117,
+    "eta": 819
+  },
+  {
+    "vehicle_id": "veh_142602",
+    "origin_time_sec": 1081,
+    "destination_time_sec": 2127,
+    "total_travel_time_seconds": 1046,
+    "eta": 928
+  },
+  {
+    "vehicle_id": "veh_143086",
+    "origin_time_sec": 1141,
+    "destination_time_sec": 1885,
+    "total_travel_time_seconds": 744,
+    "eta": 686
+  },
+  {
+    "vehicle_id": "veh_145694",
+    "origin_time_sec": 781,
+    "destination_time_sec": 1571,
+    "total_travel_time_seconds": 790,
+    "eta": 372
+  },
+  {
+    "vehicle_id": "veh_152220",
+    "origin_time_sec": 1021,
+    "destination_time_sec": 1801,
+    "total_travel_time_seconds": 780,
+    "eta": 602
+  },
+  {
+    "vehicle_id": "veh_152818",
+    "origin_time_sec": 421,
+    "destination_time_sec": 1203,
+    "total_travel_time_seconds": 782,
+    "eta": 4
+  },
+  {
+    "vehicle_id": "veh_154392",
+    "origin_time_sec": 1081,
+    "destination_time_sec": 1976,
+    "total_travel_time_seconds": 895,
+    "eta": 777
+  },
+  {
+    "vehicle_id": "veh_158876",
+    "origin_time_sec": 961,
+    "destination_time_sec": 1802,
+    "total_travel_time_seconds": 841,
+    "eta": 603
+  },
+  {
+    "vehicle_id": "veh_187485",
+    "origin_time_sec": 541,
+    "destination_time_sec": 1647,
+    "total_travel_time_seconds": 1106,
+    "eta": 448
+  },
+  {
+    "vehicle_id": "veh_190330",
+    "origin_time_sec": 301,
+    "destination_time_sec": 1261,
+    "total_travel_time_seconds": 960,
+    "eta": 62
+  },
+  {
+    "vehicle_id": "veh_190528",
+    "origin_time_sec": 661,
+    "destination_time_sec": 1504,
+    "total_travel_time_seconds": 843,
+    "eta": 305
+  },
+  {
+    "vehicle_id": "veh_204866",
+    "origin_time_sec": 1141,
+    "destination_time_sec": 1984,
+    "total_travel_time_seconds": 843,
+    "eta": 785
+  },
+  {
+    "vehicle_id": "veh_208819",
+    "origin_time_sec": 1021,
+    "destination_time_sec": 1757,
+    "total_travel_time_seconds": 736,
+    "eta": 558
+  },
+  {
+    "vehicle_id": "veh_215539",
+    "origin_time_sec": 721,
+    "destination_time_sec": 1622,
+    "total_travel_time_seconds": 901,
+    "eta": 423
+  },
+  {
+    "vehicle_id": "veh_228297",
+    "origin_time_sec": 841,
+    "destination_time_sec": 1262,
+    "total_travel_time_seconds": 421,
+    "eta": 63
+  },
+  {
+    "vehicle_id": "veh_229162",
+    "origin_time_sec": 1201,
+    "destination_time_sec": 2090,
+    "total_travel_time_seconds": 889,
+    "eta": 891
+  },
+  {
+    "vehicle_id": "veh_231661",
+    "origin_time_sec": 901,
+    "destination_time_sec": 2145,
+    "total_travel_time_seconds": 1244,
+    "eta": 946
+  }
+]
