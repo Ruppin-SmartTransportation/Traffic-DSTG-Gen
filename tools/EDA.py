@@ -1,334 +1,366 @@
-import re
-import matplotlib.pyplot as plt
+import os
+import json
+import random
+import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import skew, kurtosis
+from tqdm import tqdm
+import argparse
+import sys
 
-def plot_vehicles_time_pdf(log_text, pdf_filename="vehicles_vs_time.pdf"):
-    # Extract time and count from each log line
-    pattern = r'(\d{2}:\d{2}:\d{2}:\d{2}:\d{2}) vehicles in route: (\d+)'
-    times = ['00:00']
-    counts = [0]
-    for match in re.finditer(pattern, log_text):
-        # Reformat as HH:MM for display, using hour+minute in the correct order
-        time_str = match.group(1)
-        # Parse as: DD:HH:MM:SS:ms (from your format)
-        ww, dd, hh, mm, ss = time_str.split(":")
-        display_time = f"{hh}:{mm}"
-        times.append(display_time)
-        counts.append(int(match.group(2)))
-    # Make DataFrame
-    df = pd.DataFrame({'time': times, 'vehicles': counts})
-    # Plot
-    plt.figure(figsize=(16,6))
-    plt.plot(df['vehicles'], marker='.', linewidth=1.5)
-    plt.title('Vehicles in Route vs. Time', fontsize=18)
-    plt.ylabel('Vehicles in Route', fontsize=15)
-    plt.xlabel('Time of Day', fontsize=15)
-    # Label every hour for X axis
-    step_per_hour = 12
-    plt.xticks(
-        range(0, len(df), step_per_hour),
-        [df['time'][i] for i in range(0, len(df), step_per_hour)],
-        rotation=45,
-        fontsize=12
+SAMPLE_SIZE = 3000  # <-- Set the number of snapshot files to sample
+
+def safe_filename(s):
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in str(s))
+
+def get_snapshot_files(snapshots_folder):
+    """Return up to SAMPLE_SIZE snapshot files (excluding any 'labels' file)."""
+    all_files = [
+        os.path.join(snapshots_folder, f)
+        for f in os.listdir(snapshots_folder)
+        if f.endswith('.json') and "labels" not in f
+    ]
+    if len(all_files) > SAMPLE_SIZE:
+        all_files = random.sample(all_files, SAMPLE_SIZE)
+        print(f"Randomly sampled {SAMPLE_SIZE} snapshot files for analysis.")
+    return all_files
+
+def analyze_feature_distribution(
+    snapshots_folder,
+    feature_name,
+    entity_type,
+    output_options=None,
+    sample_size=None,
+    export_folder="./eda_exports"
+):
+    """
+    Analyze the distribution of a specific feature for a given entity type.
+    Exports plots and stats to export_folder.
+    """
+    os.makedirs(export_folder, exist_ok=True)
+    all_files = get_snapshot_files(snapshots_folder)
+    values = []
+    for file in tqdm(all_files, desc=f"Scanning files for {feature_name} ({entity_type})"):
+        with open(file, 'r') as f:
+            data = json.load(f)
+            if entity_type == "vehicle":
+                for node in data.get("nodes", []):
+                    if node.get("node_type") == 1:
+                        v = node.get(feature_name)
+                        if v is not None:
+                            values.append(v)
+            elif entity_type == "junction":
+                for node in data.get("nodes", []):
+                    if node.get("node_type") == 0:
+                        v = node.get(feature_name)
+                        if v is not None:
+                            values.append(v)
+            elif entity_type == "edge":
+                for edge in data.get("edges", []):
+                    v = edge.get(feature_name)
+                    if v is not None:
+                        values.append(v)
+    if not values:
+        print(f"No values found for feature '{feature_name}'.")
+        return
+
+    if sample_size and sample_size < len(values):
+        values = random.sample(values, sample_size)
+    values = np.array(values)
+    if output_options is None:
+        output_options = ["histogram", "boxplot", "stats"]
+
+    base = f"{entity_type}_{safe_filename(feature_name)}"
+
+    if "histogram" in output_options:
+        plt.figure()
+        plt.hist(values, bins=50)
+        plt.title(f"Histogram of {feature_name}")
+        plt.xlabel(feature_name)
+        plt.ylabel("Count")
+        fname = os.path.join(export_folder, f"{base}_histogram.png")
+        plt.savefig(fname)
+        plt.close()
+        print(f"Saved histogram to {fname}")
+
+    if "boxplot" in output_options:
+        plt.figure()
+        plt.boxplot(values, vert=False)
+        plt.title(f"Boxplot of {feature_name}")
+        plt.xlabel(feature_name)
+        fname = os.path.join(export_folder, f"{base}_boxplot.png")
+        plt.savefig(fname)
+        plt.close()
+        print(f"Saved boxplot to {fname}")
+
+    if "stats" in output_options:
+        statstr = (
+            f"Statistics for {feature_name} ({entity_type}):\n"
+            f"Count: {len(values)}\n"
+            f"Mean: {np.mean(values):.3f}\n"
+            f"Std: {np.std(values):.3f}\n"
+            f"Min: {np.min(values):.3f}\n"
+            f"Max: {np.max(values):.3f}\n"
+            f"Skewness: {skew(values):.3f}\n"
+            f"Kurtosis: {kurtosis(values):.3f}\n"
+        )
+        fname = os.path.join(export_folder, f"{base}_stats.txt")
+        with open(fname, "w") as f:
+            f.write(statstr)
+        print(f"Saved stats to {fname}")
+
+    if "skewness" in output_options:
+        plt.figure()
+        pd.Series(values).plot(kind='kde', title=f"KDE of {feature_name} (Skewness: {skew(values):.2f})")
+        plt.xlabel(feature_name)
+        fname = os.path.join(export_folder, f"{base}_kde_skewness.png")
+        plt.savefig(fname)
+        plt.close()
+        print(f"Saved skewness plot to {fname}")
+
+    if "normalization_preview" in output_options:
+        minmax = (values - np.min(values)) / (np.max(values) - np.min(values))
+        zscore = (values - np.mean(values)) / np.std(values)
+        plt.figure()
+        plt.hist(minmax, bins=50, alpha=0.7, label='Min-max')
+        plt.hist(zscore, bins=50, alpha=0.7, label='Z-score')
+        plt.title(f"Normalized distributions of {feature_name}")
+        plt.legend()
+        fname = os.path.join(export_folder, f"{base}_normalization_preview.png")
+        plt.savefig(fname)
+        plt.close()
+        print(f"Saved normalization preview to {fname}")
+
+    if "outliers" in output_options:
+        q1, q3 = np.percentile(values, [25, 75])
+        iqr = q3 - q1
+        lower = q1 - 1.5 * iqr
+        upper = q3 + 1.5 * iqr
+        outliers = values[(values < lower) | (values > upper)]
+        outlierstr = f"Found {len(outliers)} outliers ({100 * len(outliers)/len(values):.2f}%) for {feature_name}.\n"
+        if len(outliers) > 0:
+            outlierstr += f"Outlier values (first 10): {outliers[:10]}\n"
+        fname = os.path.join(export_folder, f"{base}_outliers.txt")
+        with open(fname, "w") as f:
+            f.write(outlierstr)
+        print(f"Saved outlier report to {fname}")
+        plt.figure()
+        plt.scatter(range(len(values)), values, alpha=0.5, label='All')
+        plt.scatter(np.where((values < lower) | (values > upper)), outliers, color='red', label='Outliers')
+        plt.title(f"Outliers in {feature_name}")
+        plt.xlabel("Sample Index")
+        plt.ylabel(feature_name)
+        plt.legend()
+        fname = os.path.join(export_folder, f"{base}_outliers_plot.png")
+        plt.savefig(fname)
+        plt.close()
+        print(f"Saved outlier plot to {fname}")
+
+def get_available_features(snapshots_folder, entity_type):
+    """
+    Returns a sorted list of features for the specified entity type
+    """
+    all_files = get_snapshot_files(snapshots_folder)
+    if not all_files:
+        return []
+    with open(all_files[0], 'r') as f:
+        data = json.load(f)
+        features = set()
+        if entity_type == "vehicle":
+            for node in data.get("nodes", []):
+                if node.get("node_type") == 1:
+                    features.update(node.keys())
+        elif entity_type == "junction":
+            for node in data.get("nodes", []):
+                if node.get("node_type") == 0:
+                    features.update(node.keys())
+        elif entity_type == "edge":
+            for edge in data.get("edges", []):
+                features.update(edge.keys())
+    return sorted(features)
+
+def summarize_features_for_preprocessing(
+    snapshots_folder,
+    export_folder="./eda_exports"
+):
+    def _safe_filename(s):
+        return "".join(c if c.isalnum() or c in "-_." else "_" for c in str(s))
+
+    def _summarize_features(values):
+        s = pd.Series(values)
+        summary = {
+            "count": len(s),
+            "mean": s.mean(),
+            "std": s.std(),
+            "min": s.min(),
+            "25%": s.quantile(0.25),
+            "median": s.median(),
+            "75%": s.quantile(0.75),
+            "max": s.max(),
+            "skewness": skew(s, nan_policy="omit"),
+            "kurtosis": kurtosis(s, nan_policy="omit"),
+            "num_missing": s.isnull().sum(),
+            "num_unique": s.nunique(),
+        }
+        if summary["num_unique"] < 20:
+            summary["value_counts"] = s.value_counts().to_dict()
+        return summary
+
+    os.makedirs(export_folder, exist_ok=True)
+    all_files = get_snapshot_files(snapshots_folder)
+    entity_types = {
+        "vehicle": lambda node: node.get("node_type") == 1,
+        "junction": lambda node: node.get("node_type") == 0,
+        "edge": None,  # For "edges" array
+    }
+    for entity, filter_fn in entity_types.items():
+        print(f"\nProcessing {entity} features...")
+        feature_values = dict()
+        for file in tqdm(all_files, desc=f"Scanning {entity} files"):
+            with open(file, 'r') as f:
+                data = json.load(f)
+                if entity == "edge":
+                    items = data.get("edges", [])
+                else:
+                    items = [n for n in data.get("nodes", []) if filter_fn(n)]
+                for item in items:
+                    for k, v in item.items():
+                        feature_values.setdefault(k, []).append(v)
+        rows = []
+        for feat, vals in feature_values.items():
+            # Skip features that are lists or dicts (complex structures)
+            if all(isinstance(v, (list, dict)) or v is None for v in vals):
+                print(f"Skipping complex feature '{feat}' (all values are lists/dicts).")
+                continue
+            vals_clean = [v if v not in [None, "", "None"] else np.nan for v in vals]
+            try:
+                vals_num = pd.to_numeric(pd.Series(vals_clean), errors='coerce')
+                is_numeric = not np.all(np.isnan(vals_num))
+            except Exception:
+                is_numeric = False
+            if is_numeric:
+                vals_for_stats = vals_num.dropna()
+                summary = _summarize_features(vals_for_stats)
+            else:
+                # Only keep scalar (hashable) values for categorical stats
+                scalars = [v for v in vals_clean if not isinstance(v, (list, dict))]
+                summary = {
+                    "count": len(vals_clean),
+                    "num_missing": sum(pd.isna(vals_clean)),
+                    "num_unique": len(set(scalars)),
+                    "value_counts": pd.Series(scalars).value_counts().to_dict() if len(set(scalars)) < 20 else None
+                }
+            row = {
+                "feature": feat,
+                "type": "numeric" if is_numeric else "categorical"
+            }
+            row.update(summary)
+            rows.append(row)
+
+        df = pd.DataFrame(rows)
+        outpath = os.path.join(export_folder, f"{entity}_feature_summary.csv")
+        df.to_csv(outpath, index=False)
+        print(f"Saved {entity} summary to {outpath}")
+
+def print_menu(options, prompt="Select an option:"):
+    for i, option in enumerate(options, 1):
+        print(f"{i}. {option}")
+    while True:
+        choice = input(f"{prompt} (1-{len(options)}): ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(options):
+            return int(choice) - 1
+        else:
+            print("Invalid choice. Try again.")
+
+def main():
+    parser = argparse.ArgumentParser(description="Traffic Simulation EDA Toolset")
+    parser.add_argument(
+        "snapshots_folder",
+        type=str,
+        nargs="?",
+        default="/media/guy/StorageVolume/traffic_data",
+        help="Path to folder with snapshot JSON files (default: /media/guy/StorageVolume/traffic_data)"
     )
-    plt.yticks(fontsize=12)
-    plt.tight_layout()
-    plt.grid(True, which='both', axis='y', linestyle='--', alpha=0.5)
-    # Save as PDF (vector, best for publication)
-    plt.savefig(pdf_filename)
-    plt.show()
-    plt.close()
+    args = parser.parse_args()
 
-# Usage: paste your log in place of 'log_text'
+    print("\nWelcome to the Dynamic Traffic Simulation EDA Toolkit")
+    print("=====================================================")
 
-full_log = """
-00:00:00:05:00 vehicles in route: 15
-00:00:00:10:00 vehicles in route: 28
-00:00:00:15:00 vehicles in route: 33
-00:00:00:20:00 vehicles in route: 30
-00:00:00:25:00 vehicles in route: 33
-00:00:00:30:00 vehicles in route: 36
-00:00:00:35:00 vehicles in route: 34
-00:00:00:40:00 vehicles in route: 35
-00:00:00:45:00 vehicles in route: 28
-00:00:00:50:00 vehicles in route: 29
-00:00:00:55:00 vehicles in route: 35
-00:00:01:00:00 vehicles in route: 28
-00:00:01:05:00 vehicles in route: 32
-00:00:01:10:00 vehicles in route: 34
-00:00:01:15:00 vehicles in route: 31
-00:00:01:20:00 vehicles in route: 33
-00:00:01:25:00 vehicles in route: 34
-00:00:01:30:00 vehicles in route: 38
-00:00:01:35:00 vehicles in route: 32
-00:00:01:40:00 vehicles in route: 35
-00:00:01:45:00 vehicles in route: 33
-00:00:01:50:00 vehicles in route: 34
-00:00:01:55:00 vehicles in route: 35
-00:00:02:00:00 vehicles in route: 37
-00:00:02:05:00 vehicles in route: 32
-00:00:02:10:00 vehicles in route: 31
-00:00:02:15:00 vehicles in route: 26
-00:00:02:20:00 vehicles in route: 27
-00:00:02:25:00 vehicles in route: 31
-00:00:02:30:00 vehicles in route: 30
-00:00:02:35:00 vehicles in route: 31
-00:00:02:40:00 vehicles in route: 32
-00:00:02:45:00 vehicles in route: 31
-00:00:02:50:00 vehicles in route: 29
-00:00:02:55:00 vehicles in route: 32
-00:00:03:00:00 vehicles in route: 35
-00:00:03:05:00 vehicles in route: 35
-00:00:03:10:00 vehicles in route: 33
-00:00:03:15:00 vehicles in route: 33
-00:00:03:20:00 vehicles in route: 33
-00:00:03:25:00 vehicles in route: 31
-00:00:03:30:00 vehicles in route: 30
-00:00:03:35:00 vehicles in route: 34
-00:00:03:40:00 vehicles in route: 31
-00:00:03:45:00 vehicles in route: 32
-00:00:03:50:00 vehicles in route: 31
-00:00:03:55:00 vehicles in route: 36
-00:00:04:00:00 vehicles in route: 33
-00:00:04:05:00 vehicles in route: 30
-00:00:04:10:00 vehicles in route: 30
-00:00:04:15:00 vehicles in route: 30
-00:00:04:20:00 vehicles in route: 31
-00:00:04:25:00 vehicles in route: 31
-00:00:04:30:00 vehicles in route: 31
-00:00:04:35:00 vehicles in route: 28
-00:00:04:40:00 vehicles in route: 30
-00:00:04:45:00 vehicles in route: 29
-00:00:04:50:00 vehicles in route: 36
-00:00:04:55:00 vehicles in route: 32
-00:00:05:00:00 vehicles in route: 30
-00:00:05:05:00 vehicles in route: 141
-00:00:05:10:00 vehicles in route: 206
-00:00:05:15:00 vehicles in route: 261
-00:00:05:20:00 vehicles in route: 252
-00:00:05:25:00 vehicles in route: 266
-00:00:05:30:00 vehicles in route: 260
-00:00:05:35:00 vehicles in route: 263
-00:00:05:40:00 vehicles in route: 245
-00:00:05:45:00 vehicles in route: 249
-00:00:05:50:00 vehicles in route: 259
-00:00:05:55:00 vehicles in route: 272
-00:00:06:00:00 vehicles in route: 271
-00:00:06:05:00 vehicles in route: 272
-00:00:06:10:00 vehicles in route: 266
-00:00:06:15:00 vehicles in route: 251
-00:00:06:20:00 vehicles in route: 254
-00:00:06:25:00 vehicles in route: 267
-00:00:06:30:00 vehicles in route: 252
-00:00:06:35:00 vehicles in route: 357
-00:00:06:40:00 vehicles in route: 471
-00:00:06:45:00 vehicles in route: 547
-00:00:06:50:00 vehicles in route: 577
-00:00:06:55:00 vehicles in route: 582
-00:00:07:00:00 vehicles in route: 614
-00:00:07:05:00 vehicles in route: 624
-00:00:07:10:00 vehicles in route: 642
-00:00:07:15:00 vehicles in route: 670
-00:00:07:20:00 vehicles in route: 673
-00:00:07:25:00 vehicles in route: 689
-00:00:07:30:00 vehicles in route: 713
-00:00:07:35:00 vehicles in route: 707
-00:00:07:40:00 vehicles in route: 731
-00:00:07:45:00 vehicles in route: 743
-00:00:07:50:00 vehicles in route: 767
-00:00:07:55:00 vehicles in route: 743
-00:00:08:00:00 vehicles in route: 760
-00:00:08:05:00 vehicles in route: 780
-00:00:08:10:00 vehicles in route: 784
-00:00:08:15:00 vehicles in route: 795
-00:00:08:20:00 vehicles in route: 809
-00:00:08:25:00 vehicles in route: 808
-00:00:08:30:00 vehicles in route: 832
-00:00:08:35:00 vehicles in route: 818
-00:00:08:40:00 vehicles in route: 835
-00:00:08:45:00 vehicles in route: 863
-00:00:08:50:00 vehicles in route: 868
-00:00:08:55:00 vehicles in route: 883
-00:00:09:00:00 vehicles in route: 880
-00:00:09:05:00 vehicles in route: 896
-00:00:09:10:00 vehicles in route: 934
-00:00:09:15:00 vehicles in route: 941
-00:00:09:20:00 vehicles in route: 967
-00:00:09:25:00 vehicles in route: 948
-00:00:09:30:00 vehicles in route: 945
-00:00:09:35:00 vehicles in route: 906
-00:00:09:40:00 vehicles in route: 813
-00:00:09:45:00 vehicles in route: 764
-00:00:09:50:00 vehicles in route: 703
-00:00:09:55:00 vehicles in route: 694
-00:00:10:00:00 vehicles in route: 662
-00:00:10:05:00 vehicles in route: 632
-00:00:10:10:00 vehicles in route: 592
-00:00:10:15:00 vehicles in route: 558
-00:00:10:20:00 vehicles in route: 562
-00:00:10:25:00 vehicles in route: 539
-00:00:10:30:00 vehicles in route: 541
-00:00:10:35:00 vehicles in route: 539
-00:00:10:40:00 vehicles in route: 547
-00:00:10:45:00 vehicles in route: 549
-00:00:10:50:00 vehicles in route: 535
-00:00:10:55:00 vehicles in route: 531
-00:00:11:00:00 vehicles in route: 531
-00:00:11:05:00 vehicles in route: 530
-00:00:11:10:00 vehicles in route: 523
-00:00:11:15:00 vehicles in route: 525
-00:00:11:20:00 vehicles in route: 516
-00:00:11:25:00 vehicles in route: 519
-00:00:11:30:00 vehicles in route: 500
-00:00:11:35:00 vehicles in route: 490
-00:00:11:40:00 vehicles in route: 485
-00:00:11:45:00 vehicles in route: 486
-00:00:11:50:00 vehicles in route: 496
-00:00:11:55:00 vehicles in route: 479
-00:00:12:00:00 vehicles in route: 466
-00:00:12:05:00 vehicles in route: 422
-00:00:12:10:00 vehicles in route: 376
-00:00:12:15:00 vehicles in route: 367
-00:00:12:20:00 vehicles in route: 337
-00:00:12:25:00 vehicles in route: 309
-00:00:12:30:00 vehicles in route: 287
-00:00:12:35:00 vehicles in route: 298
-00:00:12:40:00 vehicles in route: 290
-00:00:12:45:00 vehicles in route: 262
-00:00:12:50:00 vehicles in route: 262
-00:00:12:55:00 vehicles in route: 263
-00:00:13:00:00 vehicles in route: 251
-00:00:13:05:00 vehicles in route: 257
-00:00:13:10:00 vehicles in route: 265
-00:00:13:15:00 vehicles in route: 268
-00:00:13:20:00 vehicles in route: 258
-00:00:13:25:00 vehicles in route: 256
-00:00:13:30:00 vehicles in route: 248
-00:00:13:35:00 vehicles in route: 308
-00:00:13:40:00 vehicles in route: 315
-00:00:13:45:00 vehicles in route: 323
-00:00:13:50:00 vehicles in route: 319
-00:00:13:55:00 vehicles in route: 326
-00:00:14:00:00 vehicles in route: 334
-00:00:14:05:00 vehicles in route: 346
-00:00:14:10:00 vehicles in route: 347
-00:00:14:15:00 vehicles in route: 353
-00:00:14:20:00 vehicles in route: 336
-00:00:14:25:00 vehicles in route: 341
-00:00:14:30:00 vehicles in route: 342
-00:00:14:35:00 vehicles in route: 350
-00:00:14:40:00 vehicles in route: 332
-00:00:14:45:00 vehicles in route: 343
-00:00:14:50:00 vehicles in route: 354
-00:00:14:55:00 vehicles in route: 354
-00:00:15:00:00 vehicles in route: 338
-00:00:15:05:00 vehicles in route: 330
-00:00:15:10:00 vehicles in route: 346
-00:00:15:15:00 vehicles in route: 354
-00:00:15:20:00 vehicles in route: 343
-00:00:15:25:00 vehicles in route: 344
-00:00:15:30:00 vehicles in route: 350
-00:00:15:35:00 vehicles in route: 358
-00:00:15:40:00 vehicles in route: 375
-00:00:15:45:00 vehicles in route: 349
-00:00:15:50:00 vehicles in route: 360
-00:00:15:55:00 vehicles in route: 356
-00:00:16:00:00 vehicles in route: 345
-00:00:16:05:00 vehicles in route: 226
-00:00:16:10:00 vehicles in route: 96
-00:00:16:15:00 vehicles in route: 36
-00:00:16:20:00 vehicles in route: 33
-00:00:16:25:00 vehicles in route: 32
-00:00:16:30:00 vehicles in route: 29
-00:00:16:35:00 vehicles in route: 33
-00:00:16:40:00 vehicles in route: 33
-00:00:16:45:00 vehicles in route: 32
-00:00:16:50:00 vehicles in route: 32
-00:00:16:55:00 vehicles in route: 35
-00:00:17:00:00 vehicles in route: 30
-00:00:17:05:00 vehicles in route: 34
-00:00:17:10:00 vehicles in route: 34
-00:00:17:15:00 vehicles in route: 30
-00:00:17:20:00 vehicles in route: 30
-00:00:17:25:00 vehicles in route: 33
-00:00:17:30:00 vehicles in route: 33
-00:00:17:35:00 vehicles in route: 35
-00:00:17:40:00 vehicles in route: 35
-00:00:17:45:00 vehicles in route: 37
-00:00:17:50:00 vehicles in route: 30
-00:00:17:55:00 vehicles in route: 33
-00:00:18:00:00 vehicles in route: 29
-00:00:18:05:00 vehicles in route: 34
-00:00:18:10:00 vehicles in route: 37
-00:00:18:15:00 vehicles in route: 38
-00:00:18:20:00 vehicles in route: 38
-00:00:18:25:00 vehicles in route: 30
-00:00:18:30:00 vehicles in route: 31
-00:00:18:35:00 vehicles in route: 31
-00:00:18:40:00 vehicles in route: 33
-00:00:18:45:00 vehicles in route: 33
-00:00:18:50:00 vehicles in route: 34
-00:00:18:55:00 vehicles in route: 32
-00:00:19:00:00 vehicles in route: 30
-00:00:19:05:00 vehicles in route: 83
-00:00:19:10:00 vehicles in route: 115
-00:00:19:15:00 vehicles in route: 129
-00:00:19:20:00 vehicles in route: 137
-00:00:19:25:00 vehicles in route: 145
-00:00:19:30:00 vehicles in route: 155
-00:00:19:35:00 vehicles in route: 150
-00:00:19:40:00 vehicles in route: 153
-00:00:19:45:00 vehicles in route: 160
-00:00:19:50:00 vehicles in route: 139
-00:00:19:55:00 vehicles in route: 129
-00:00:20:00:00 vehicles in route: 145
-00:00:20:05:00 vehicles in route: 142
-00:00:20:10:00 vehicles in route: 137
-00:00:20:15:00 vehicles in route: 147
-00:00:20:20:00 vehicles in route: 142
-00:00:20:25:00 vehicles in route: 143
-00:00:20:30:00 vehicles in route: 131
-00:00:20:35:00 vehicles in route: 134
-00:00:20:40:00 vehicles in route: 147
-00:00:20:45:00 vehicles in route: 133
-00:00:20:50:00 vehicles in route: 137
-00:00:20:55:00 vehicles in route: 149
-00:00:21:00:00 vehicles in route: 150
-00:00:21:05:00 vehicles in route: 140
-00:00:21:10:00 vehicles in route: 144
-00:00:21:15:00 vehicles in route: 137
-00:00:21:20:00 vehicles in route: 138
-00:00:21:25:00 vehicles in route: 139
-00:00:21:30:00 vehicles in route: 146
-00:00:21:35:00 vehicles in route: 136
-00:00:21:40:00 vehicles in route: 141
-00:00:21:45:00 vehicles in route: 150
-00:00:21:50:00 vehicles in route: 158
-00:00:21:55:00 vehicles in route: 156
-00:00:22:00:00 vehicles in route: 160
-00:00:22:05:00 vehicles in route: 142
-00:00:22:10:00 vehicles in route: 147
-00:00:22:15:00 vehicles in route: 138
-00:00:22:20:00 vehicles in route: 145
-00:00:22:25:00 vehicles in route: 145
-00:00:22:30:00 vehicles in route: 129
-00:00:22:35:00 vehicles in route: 145
-00:00:22:40:00 vehicles in route: 144
-00:00:22:45:00 vehicles in route: 150
-00:00:22:50:00 vehicles in route: 148
-00:00:22:55:00 vehicles in route: 144
-00:00:23:00:00 vehicles in route: 138
-00:00:23:05:00 vehicles in route: 98
-00:00:23:10:00 vehicles in route: 63
-00:00:23:15:00 vehicles in route: 40
-00:00:23:20:00 vehicles in route: 33
-00:00:23:25:00 vehicles in route: 33
-00:00:23:30:00 vehicles in route: 33
-00:00:23:35:00 vehicles in route: 35
-00:00:23:40:00 vehicles in route: 32
-00:00:23:45:00 vehicles in route: 33
-00:00:23:50:00 vehicles in route: 29
-00:00:23:55:00 vehicles in route: 33
-00:01:00:00:00 vehicles in route: 29
-"""
-plot_vehicles_time_pdf(full_log)
+    while True:
+        print("\nMain Menu:")
+        main_options = [
+            "Analyze Feature Distribution",
+            "Summarize All Features for Preprocessing",
+            "Exit"
+        ]
+        main_choice = print_menu(main_options, "Choose action")
+
+        if main_choice == 2:  # Exit
+            print("Goodbye!")
+            sys.exit(0)
+
+        elif main_choice == 1:  # Summarize all features
+            print("\nGenerating comprehensive summary for all features. This may take a few minutes...")
+            summarize_features_for_preprocessing(args.snapshots_folder)
+            print("Feature summaries exported to ./eda_exports/")
+            continue
+
+        # Entity selection
+        print("\nSelect entity for feature analysis:")
+        entity_options = [
+            "Vehicle features",
+            "Junction features",
+            "Road features (edges)"
+        ]
+        entity_map = ["vehicle", "junction", "edge"]
+        entity_choice = print_menu(entity_options, "Choose entity type")
+        entity_type = entity_map[entity_choice]
+
+        features = get_available_features(args.snapshots_folder, entity_type)
+        if not features:
+            print("No features found for this entity.")
+            continue
+
+        print("\nAvailable Features:")
+        feature_idx = print_menu(features, "Select a feature to analyze")
+        feature_name = features[feature_idx]
+
+        analysis_options = [
+            "Show Histogram",
+            "Show Boxplot",
+            "Print Statistics",
+            "Detect Outliers",
+            "Show Normalization Preview",
+            "Show Skewness Plot",
+            "Back to Main Menu"
+        ]
+        while True:
+            print(f"\nAnalysis Options for '{feature_name}':")
+            analysis_idx = print_menu(analysis_options, "Select analysis output")
+            if analysis_options[analysis_idx] == "Back to Main Menu":
+                break
+
+            submenu_map = {
+                0: ["histogram"],
+                1: ["boxplot"],
+                2: ["stats"],
+                3: ["outliers"],
+                4: ["normalization_preview"],
+                5: ["skewness"],
+            }
+            analyze_feature_distribution(
+                snapshots_folder=args.snapshots_folder,
+                feature_name=feature_name,
+                entity_type=entity_type,
+                output_options=submenu_map[analysis_idx]
+            )
+
+        print("\nWould you like to:")
+        next_step = print_menu(["Start Over", "Exit"])
+        if next_step == 1:
+            print("Goodbye!")
+            sys.exit(0)
+
+if __name__ == "__main__":
+    main()
