@@ -42,6 +42,39 @@ This toolkit integrates with SUMO (Simulation of Urban Mobility) and supports us
 
 ---
 
+
+
+## Novelty: Dynamic Graph Construction with Vehicle Nodes
+
+A key innovation of **Traffic-DSTG-Gen** is the representation of **dynamic traffic states as graphs where both junctions *and* vehicles are nodes**. Unlike traditional approaches—which typically only model junctions and road segments—our framework dynamically rewires the graph at each simulation step to reflect the actual positions of vehicles on the road network.
+
+- **Junctions** (blue nodes): Represent intersections in the traffic network.
+- **Vehicles** (orange nodes): Represent every vehicle currently active in the network.
+- **Static edges** (grey): Represent roads that currently have no vehicles on them.
+- **Dynamic edges** (red): For every road segment with vehicles, the edge is replaced by a *chain* of red edges connecting:
+    - The source junction to the first vehicle on the edge,
+    - Consecutive vehicles along the edge (ordered by position),
+    - The last vehicle to the destination junction.
+
+This graph snapshot visually demonstrates how the traffic graph changes with the real-time flow of vehicles, making it ideally suited for advanced **spatio-temporal graph neural network (STGNN) research**.
+
+![Dynamic Traffic Graph Example](tools/step_006120_graph.png)
+
+*Above: Example snapshot. Orange nodes = vehicles, blue nodes = junctions. Grey lines = empty roads; red chains = vehicle "convoys" on busy edges. Node labels indicate IDs.*
+
+
+## Simulation Scenario: Three Urban Zones
+
+The provided `urban_three_zones.net.xml` network models a realistic city environment with:
+
+- **Zone A:** Residential area  
+- **Zone B:** Commercial center  
+- **Zone C:** Residential zone with major attractions (weekend/evening hotspots)
+
+This scenario supports configurable rush-hour flows, attraction-based traffic, and complex real-world patterns—ideal for evaluating spatio-temporal GNNs and traffic prediction algorithms.
+
+---
+
 ## Getting Started
 
 ### 1. Clone the repository
@@ -133,15 +166,7 @@ python main.py --config simulation/simulation.config.json --net simulation/urban
 
 - Edit `simulation.config.json` to configure simulation length, traffic flow, and other parameters.
 - The output dataset (adjacency matrices, node/edge features, etc.) will be saved as specified in your configuration.
-
-### Convert simulation output to PyTorch Geometric format:
-
-```bash
-python tools/convert_to_pt.py --input <simulation_output_dir> --output <dataset.pt>
-```
-
----
-
+  
 ## Sample Output
 
 ### Example Snapshot Output (`.json`)
@@ -180,6 +205,169 @@ python tools/convert_to_pt.py --input <simulation_output_dir> --output <dataset.
 }
 ```
 *Fields truncated for clarity—see real output for full details.*
+## 🧪 Exploratory Data Analysis (EDA)
+
+The repository includes a powerful CLI-based EDA tool: `tools/EDA.py`, designed for:
+
+- 📊 **Analyzing feature distributions** across vehicles, junctions, and edges  
+- 🚨 **Detecting outliers**  
+- 🔍 **Summarizing features** for preprocessing  
+- 📤 **Exporting plots and stats** into `eda_exports/`
+
+### 🔍 Supported Features
+
+You can analyze features such as:
+- `speed`, `zone`, `density`, `origin_zone`, `destination_zone`, etc.
+- Works for any entity type: **vehicles**, **junctions**, or **edges**
+
+### 🖥️ Example: Run the Toolkit
+
+```bash
+python tools/EDA.py --snapshots_folder traffic_data
+```
+
+You’ll be prompted to:
+1. Choose entity type (e.g., vehicles)
+2. Select a feature (e.g., speed)
+3. Choose analysis type:
+   - Histogram
+   - Boxplot
+   - Stats (mean, std, skew, kurtosis)
+   - Outliers
+   - Skewness (KDE)
+   - Normalization preview
+
+### 🗃️ Exported Results
+
+Saved in `./eda_exports/`, including:
+- `*_histogram.png` — feature distribution
+- `*_boxplot.png` — outlier sensitivity
+- `*_stats.txt` — statistical summary
+- `*_outliers.txt` — detected anomalies
+- `*_normalization_preview.png` — min-max & z-score comparison
+- `*_feature_summary.csv` — summary across all features (for preprocessing)
+
+---
+
+This tool is especially useful for:
+- Selecting robust and informative features for your STGNN models
+- Understanding scaling requirements and outlier behavior
+- Detecting data imbalance or skewed inputs
+- Creating thesis-ready EDA summaries and plots
+
+### Convert simulation output to PyTorch Geometric format:
+
+```bash
+python tools/convert_to_pt.py --input <simulation_output_dir> --output <dataset.pt>
+```
+
+---
+
+
+# 🧰 Dataset Preparation Workflow
+
+This project includes four key scripts to transform SUMO simulation output into clean, GNN-ready `.pt` graph files. These tools support a full preprocessing pipeline, from raw snapshots to validated PyTorch Geometric datasets.
+
+---
+
+## 🔁 Full Workflow Overview
+
+1. **[Simulation]** Generate traffic snapshots and a global `labels.json` from SUMO using `main.py`
+2. **[Labeling]** Generate per-snapshot ETA labels using `create_labels_json.py`
+3. **[EDA]** Generate feature statistics using `EDA.py`
+4. **[Conversion]** Convert data to `.pt` format using `convert_to_pt.py`
+5. **[Validation]** Verify `.pt` integrity using `pt_validation.py`
+
+---
+
+## 1. [main.py] – Generate Snapshots & Ground Truth Labels
+
+This script runs the SUMO simulation and generates:
+- Snapshot files: `step_XXXX.json`
+- Global ground truth label file: `labels.json`
+
+### ✅ Example:
+```bash
+python main.py --config simulation/simulation.config.json --sumo-gui
+```
+
+Outputs are written to `traffic_data/`
+
+---
+
+## 2. `create_labels_json.py` – Generate Per-Snapshot Ground Truth Labels
+
+This script creates per-snapshot label files (`labels_*.json`) based on the global `labels.json`.
+
+### ✅ Command:
+```bash
+python tools/create_labels_json.py \
+  --snapshots_folder traffic_data \
+  --gt_labels_path traffic_data/labels.json \
+  --output_labels_folder traffic_data/labels
+```
+
+---
+
+## 3. `EDA.py` – Generate Feature Summaries
+
+This script analyzes simulation data and exports feature statistics needed for preprocessing and normalization.
+
+### ✅ Command:
+```bash
+python tools/EDA.py --snapshots_folder traffic_data
+```
+
+Outputs are saved in `eda_exports/`:
+- `vehicle_feature_summary.csv`
+- `junction_feature_summary.csv`
+- `edge_feature_summary.csv`
+
+---
+
+## 4. `convert_to_pt.py` – Convert to PyTorch Geometric Format
+
+Transforms snapshot+label `.json` files into `.pt` graph datasets.
+
+### ✅ Command:
+```bash
+python tools/convert_to_pt.py \
+  --snapshots_folder traffic_data \
+  --labels_folder traffic_data/labels \
+  --eda_folder eda_exports \
+  --out_graph_folder traffic_data_pt
+```
+
+---
+
+## 5. `pt_validation.py` – Validate .pt Graph Files
+
+Randomly samples `.pt` files and compares fields against raw `.json` and labels.
+
+### ✅ Command:
+```bash
+python tools/pt_validation.py \
+  --pt_folder traffic_data_pt \
+  --gt_folder traffic_data/labels \
+  --snapshot_folder traffic_data \
+  --eda_folder eda_exports \
+  --n_samples 10
+```
+
+---
+
+## 📦 Summary Table
+
+| Step | Script                  | Input(s)                                 | Output(s)                               |
+|------|--------------------------|-------------------------------------------|------------------------------------------|
+| 1    | `main.py`                | SUMO config, network files                | `step_*.json`, `labels.json`             |
+| 2    | `create_labels_json.py` | `step_*.json`, `labels.json`              | `labels_*.json`                          |
+| 3    | `EDA.py`                 | `step_*.json`                             | `vehicle/junction/edge_feature_summary.csv` |
+| 4    | `convert_to_pt.py`       | `step_*.json`, `labels_*.json`, `.csv`    | `.pt` graph files (PyG format)           |
+| 5    | `pt_validation.py`       | `.pt`, `step_*.json`, `labels_*.json`, `.csv` | Validation logs (stdout)              |
+|------|--------------------------|-------------------------------------------|------------------------------------------|
+
+---
 
 ### Example Usage: Loading a `.pt` Graph
 
@@ -192,37 +380,6 @@ print(data)
 
 ---
 
-
-## Novelty: Dynamic Graph Construction with Vehicle Nodes
-
-A key innovation of **Traffic-DSTG-Gen** is the representation of **dynamic traffic states as graphs where both junctions *and* vehicles are nodes**. Unlike traditional approaches—which typically only model junctions and road segments—our framework dynamically rewires the graph at each simulation step to reflect the actual positions of vehicles on the road network.
-
-- **Junctions** (blue nodes): Represent intersections in the traffic network.
-- **Vehicles** (orange nodes): Represent every vehicle currently active in the network.
-- **Static edges** (grey): Represent roads that currently have no vehicles on them.
-- **Dynamic edges** (red): For every road segment with vehicles, the edge is replaced by a *chain* of red edges connecting:
-    - The source junction to the first vehicle on the edge,
-    - Consecutive vehicles along the edge (ordered by position),
-    - The last vehicle to the destination junction.
-
-This graph snapshot visually demonstrates how the traffic graph changes with the real-time flow of vehicles, making it ideally suited for advanced **spatio-temporal graph neural network (STGNN) research**.
-
-![Dynamic Traffic Graph Example](tools/step_006120_graph.png)
-
-*Above: Example snapshot. Orange nodes = vehicles, blue nodes = junctions. Grey lines = empty roads; red chains = vehicle "convoys" on busy edges. Node labels indicate IDs.*
-
-
-## Simulation Scenario: Three Urban Zones
-
-The provided `urban_three_zones.net.xml` network models a realistic city environment with:
-
-- **Zone A:** Residential area  
-- **Zone B:** Commercial center  
-- **Zone C:** Residential zone with major attractions (weekend/evening hotspots)
-
-This scenario supports configurable rush-hour flows, attraction-based traffic, and complex real-world patterns—ideal for evaluating spatio-temporal GNNs and traffic prediction algorithms.
-
----
 
 ## Contributing
 
