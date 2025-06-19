@@ -7,6 +7,7 @@ import ast
 import argparse
 from torch_geometric.data import Data
 from tqdm import tqdm
+import datetime
 
 # =======================
 # Utility: Extract EDA stats & mappings
@@ -14,7 +15,8 @@ from tqdm import tqdm
 def extract_stats_and_mappings(
     vehicle_csv_path,
     junction_csv_path,
-    edge_csv_path
+    edge_csv_path, 
+    label_csv_path=None
 ):
     def parse_counts(val):
         try:
@@ -25,6 +27,16 @@ def extract_stats_and_mappings(
             return {}
 
     feature_stats = {'vehicle': {}, 'junction': {}, 'edge': {}}
+    if label_csv_path:
+        df = pd.read_csv(label_csv_path)
+        feature_stats['labels'] = {}
+        for _, row in df.iterrows():
+            feat = row['feature']
+            entry = {
+                'mean': float(row.get('mean', 0.0)),
+                'std': float(row.get('std', 1.0)) if float(row.get('std', 1.0)) > 0 else 1.0
+            }
+            feature_stats['labels'][feat] = entry
 
     def process_csv(path, group):
         df = pd.read_csv(path)
@@ -70,17 +82,21 @@ def get_feature_layout(stats):
         'n_length': n_length,
         'n_zone': n_zone,
         'n_type': n_type,
-        'vehicle':  [
-            'node_type', 'length_oh', 'speed', 'acceleration', 'current_x', 'current_y', 'zone_oh',
-            'edge_idx', 'current_position', 'sin_hour', 'cos_hour', 'route_length', 'route_length_left', 'type_oh'
+        'vehicle': [
+            'node_type', 'length_oh', 'speed', 'acceleration', 'current_x', 'current_y',
+            'zone_oh', 'edge_idx', 'current_position',
+            'sin_hour', 'cos_hour', 'sin_day', 'cos_day',
+            'route_length', 'route_length_left', 'type_oh'
         ],
         'junction': [
-            'node_type', 'length_oh', 'speed', 'acceleration', 'current_x', 'current_y', 'zone_oh',
-            'edge_idx', 'current_position', 'sin_hour', 'cos_hour', 'route_length', 'route_length_left', 'type_oh'
-        ]
+            'node_type', 'length_oh', 'speed', 'acceleration', 'current_x', 'current_y',
+            'zone_oh', 'edge_idx', 'current_position',
+            'sin_hour', 'cos_hour', 'sin_day', 'cos_day',
+            'route_length', 'route_length_left', 'type_oh'
+        ],
     }
     feature_dim = (
-        1 + n_length + 4 + n_zone + 1 + 1 + 2 + 2 + n_type
+        1 + n_length + 4 + n_zone + 1 + 1 + 4 + 2 + n_type
     )
     return layout, feature_dim
 
@@ -140,10 +156,21 @@ def process_vehicle_nodes(vehicle_nodes, stats, feature_dim):
         curr_pos = (node.get("current_position", 0.0) - mean) / std
         feat.append(curr_pos)
         origin_start_sec = node.get("origin_start_sec", 0.0)
-        hour = ((origin_start_sec // 3600) % 24) if origin_start_sec > 0 else 0
-        sin_hour = np.sin(2 * np.pi * hour / 24)
-        cos_hour = np.cos(2 * np.pi * hour / 24)
-        feat.extend([sin_hour, cos_hour])
+
+        try:
+            dt = datetime.datetime.utcfromtimestamp(origin_start_sec)
+            hour = dt.hour + dt.minute / 60.0
+            weekday = dt.weekday()  # Monday=0, Sunday=6
+
+            sin_hour = np.sin(2 * np.pi * hour / 24)
+            cos_hour = np.cos(2 * np.pi * hour / 24)
+            sin_day = np.sin(2 * np.pi * weekday / 7)
+            cos_day = np.cos(2 * np.pi * weekday / 7)
+        except:
+            sin_hour = cos_hour = sin_day = cos_day = 0.0  # Fallback for invalid timestamps
+
+        feat.extend([sin_hour, cos_hour, sin_day, cos_day])
+
         for key in ['route_length', 'route_length_left']:
             mean = vstats[key]['mean']
             std = vstats[key]['std']
@@ -256,7 +283,11 @@ def convert_snapshot(snapshot_path, label_path, out_graph_path, stats, feature_d
         edge_index = torch.empty((2, 0), dtype=torch.long)
     edge_attrs = e_feats
 
-    label_tensor = torch.FloatTensor([label_map.get(vid, -1) for vid in vehicle_ids])
+    eta_mean = stats.get("labels", {}).get("eta", {}).get("mean", 0.0)
+    eta_std = stats.get("labels", {}).get("eta", {}).get("std", 1.0)
+    label_tensor = torch.FloatTensor([
+        (label_map.get(vid, -1) - eta_mean) / eta_std for vid in vehicle_ids
+    ])
 
     data = Data(
         x=all_node_feats,
@@ -291,12 +322,12 @@ def main():
         "--eda_folder",
         type=str,
         default="eda_exports",
-        help="Folder with feature summary CSVs"
+        help="Folder with labels and feature summary CSVs"
     )
     parser.add_argument(
         "--out_graph_folder",
         type=str,
-        default="/media/guy/StorageVolume/traffic_data_pt",
+        default="/home/guy/Projects/Traffic/traffic_data_pt",
         help="Output folder for .pt graph files"
     )
     args = parser.parse_args()
@@ -306,7 +337,9 @@ def main():
     vehicle_csv = os.path.join(args.eda_folder, "vehicle_feature_summary.csv")
     junction_csv = os.path.join(args.eda_folder, "junction_feature_summary.csv")
     edge_csv = os.path.join(args.eda_folder, "edge_feature_summary.csv")
-    stats = extract_stats_and_mappings(vehicle_csv, junction_csv, edge_csv)
+    label_csv = os.path.join(args.eda_folder, "labels_feature_summary.csv")
+
+    stats = extract_stats_and_mappings(vehicle_csv, junction_csv, edge_csv, label_csv)
     layout, feature_dim = get_feature_layout(stats)
 
     snapshot_files = sorted([f for f in os.listdir(args.snapshots_folder) if f.endswith('.json') and "labels" not in f])
