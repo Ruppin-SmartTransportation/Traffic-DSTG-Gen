@@ -180,6 +180,68 @@ def get_available_features(snapshots_folder, entity_type):
                 features.update(edge.keys())
     return sorted(features)
 
+def summarize_labels(labels_folder, export_folder="./eda_exports"):
+    print("\nProcessing label files...")
+    os.makedirs(export_folder, exist_ok=True)
+    all_files = [
+        os.path.join(labels_folder, f)
+        for f in os.listdir(labels_folder)
+        if f.startswith("labels_") and f.endswith(".json")
+    ]
+
+    feature_values = dict()
+    for file in tqdm(all_files, desc="Scanning label files"):
+        with open(file, 'r') as f:
+            label_list = json.load(f)
+            for entry in label_list:
+                for k, v in entry.items():
+                    feature_values.setdefault(k, []).append(v)
+
+    rows = []
+    for feat, vals in feature_values.items():
+        if all(isinstance(v, (list, dict)) or v is None for v in vals):
+            print(f"Skipping complex feature '{feat}' (all values are lists/dicts).")
+            continue
+        vals_clean = [v if v not in [None, "", "None"] else np.nan for v in vals]
+        try:
+            vals_num = pd.to_numeric(pd.Series(vals_clean), errors='coerce')
+            is_numeric = not np.all(np.isnan(vals_num))
+        except Exception:
+            is_numeric = False
+        if is_numeric:
+            vals_for_stats = vals_num.dropna()
+            summary = {
+                "feature": feat,
+                "type": "numeric",
+                "count": len(vals_clean),
+                "mean": np.mean(vals_for_stats),
+                "std": np.std(vals_for_stats),
+                "min": np.min(vals_for_stats),
+                "25%": np.percentile(vals_for_stats, 25),
+                "median": np.median(vals_for_stats),
+                "75%": np.percentile(vals_for_stats, 75),
+                "max": np.max(vals_for_stats),
+                "skewness": skew(vals_for_stats, nan_policy="omit"),
+                "kurtosis": kurtosis(vals_for_stats, nan_policy="omit"),
+                "num_missing": sum(pd.isna(vals_clean)),
+                "num_unique": pd.Series(vals_clean).nunique()
+            }
+        else:
+            summary = {
+                "feature": feat,
+                "type": "categorical",
+                "count": len(vals_clean),
+                "num_missing": sum(pd.isna(vals_clean)),
+                "num_unique": len(set(vals_clean))
+            }
+        rows.append(summary)
+
+    df = pd.DataFrame(rows)
+    outpath = os.path.join(export_folder, "labels_feature_summary.csv")
+    df.to_csv(outpath, index=False)
+    print(f"Saved label summary to {outpath}")
+
+
 def summarize_features_for_preprocessing(
     snapshots_folder,
     export_folder="./eda_exports"
@@ -282,6 +344,12 @@ def main():
         default="/media/guy/StorageVolume/traffic_data",
         help="Path to folder with snapshot JSON files (default: /media/guy/StorageVolume/traffic_data)"
     )
+    parser.add_argument(
+        "--labels_folder",
+        type=str,
+        default="/media/guy/StorageVolume/traffic_data/labels",
+        help="Optional path to folder with label JSON files (e.g., labels_*.json)"
+    )
     args = parser.parse_args()
 
     print("\nWelcome to the Dynamic Traffic Simulation EDA Toolkit")
@@ -291,12 +359,13 @@ def main():
         print("\nMain Menu:")
         main_options = [
             "Analyze Feature Distribution",
-            "Summarize All Features for Preprocessing",
+            "Summarize All Input Features for Preprocessing",
+            "Summarize Label Features for Preprocessing",
             "Exit"
         ]
         main_choice = print_menu(main_options, "Choose action")
 
-        if main_choice == 2:  # Exit
+        if main_choice == len(main_options)-1:  # Exit
             print("Goodbye!")
             sys.exit(0)
 
@@ -304,6 +373,15 @@ def main():
             print("\nGenerating comprehensive summary for all features. This may take a few minutes...")
             summarize_features_for_preprocessing(args.snapshots_folder)
             print("Feature summaries exported to ./eda_exports/")
+            continue
+
+        elif main_choice == 2:  # Summarize labels
+            print("\nGenerating label feature summary. This may take a few minutes...")
+            if args.labels_folder:
+                summarize_labels(args.labels_folder)
+                print("Label summaries exported to ./eda_exports/")
+            else:
+                print("No labels folder specified. Skipping label summary.")
             continue
 
         # Entity selection
