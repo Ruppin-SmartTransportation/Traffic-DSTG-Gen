@@ -16,7 +16,7 @@ def extract_stats_and_mappings(
     vehicle_csv_path,
     junction_csv_path,
     edge_csv_path, 
-    label_csv_path=None
+    label_csv_path
 ):
     def parse_counts(val):
         try:
@@ -26,17 +26,17 @@ def extract_stats_and_mappings(
         except Exception:
             return {}
 
-    feature_stats = {'vehicle': {}, 'junction': {}, 'edge': {}}
-    if label_csv_path:
-        df = pd.read_csv(label_csv_path)
-        feature_stats['labels'] = {}
-        for _, row in df.iterrows():
-            feat = row['feature']
-            entry = {
-                'mean': float(row.get('mean', 0.0)),
-                'std': float(row.get('std', 1.0)) if float(row.get('std', 1.0)) > 0 else 1.0
-            }
-            feature_stats['labels'][feat] = entry
+    feature_stats = {'vehicle': {}, 'junction': {}, 'edge': {}, 'labels': {}}
+
+    df = pd.read_csv(label_csv_path)
+    feature_stats['labels'] = {}
+    for _, row in df.iterrows():
+        feat = row['feature']
+        entry = {
+            'mean': float(row.get('mean', 0.0)),
+            'std': float(row.get('std', 1.0)) if float(row.get('std', 1.0)) > 0 else 1.0
+        }
+        feature_stats['labels'][feat] = entry
 
     def process_csv(path, group):
         df = pd.read_csv(path)
@@ -241,20 +241,64 @@ def process_edge_entities(edge_list, stats, edge_route_counts):
         features.append(feat)
     return torch.FloatTensor(features), edge_ids
 
-def process_labels(label_list):
-    label_map = {d['vehicle_id']: d['eta'] for d in label_list}
-    return label_map
+def process_labels(label_list, stats, normalize_labels, filter_outliers):
+    """
+    Processes label data into a map and filters out vehicle IDs based on ETA outliers.
+
+    Args:
+        label_list (list): List of label dictionaries from a single snapshot.
+        stats (dict): Parsed stats including 'labels' from labels_feature_summary.csv.
+        normalize_labels (bool): If True, apply z-score normalization to ETA.
+        filter_outliers (bool): If True, remove labels with |z-score| > 3.
+
+    Returns:
+        label_map (dict): {vehicle_id: eta_value}
+        valid_vehicle_ids (set): Set of vehicle IDs to keep
+    """
+    label_map = {}
+    valid_vehicle_ids = set()
+
+    eta_stats = stats.get("labels", {}).get("eta", {})
+    mean_eta = eta_stats.get("mean", 0.0)
+    std_eta = eta_stats.get("std", 1.0)
+    if std_eta == 0.0:
+        std_eta = 1.0
+    filter_outliers_count = 0
+    for entry in label_list:
+        eta = entry.get('eta')
+        vid = entry.get('vehicle_id')
+        if eta is None or vid is None:
+            continue
+
+        if normalize_labels or filter_outliers:
+            z = (eta - mean_eta) / std_eta
+
+            if filter_outliers and abs(z) > 3:
+                filter_outliers_count += 1
+                continue  # Outlier → skip
+
+            eta_final = z if normalize_labels else eta
+        else:
+            eta_final = eta
+
+        label_map[vid] = eta_final
+        valid_vehicle_ids.add(vid)
+
+    return label_map, valid_vehicle_ids
+
 
 # =======================
 # Main conversion logic
 # =======================
-def convert_snapshot(snapshot_path, label_path, out_graph_path, stats, feature_dim):
+def convert_snapshot(snapshot_path, label_path, out_graph_path, stats, feature_dim, normalize_labels, filter_outliers):
+
     with open(snapshot_path, 'r') as f:
         snapshot = json.load(f)
     with open(label_path, 'r') as f:
         labels = json.load(f)
-
-    vehicle_nodes = [n for n in snapshot.get("nodes", []) if n.get("node_type") == 1]
+    
+    label_map, valid_vehicle_ids = process_labels(labels, stats, normalize_labels, filter_outliers)
+    vehicle_nodes = [n for n in snapshot.get("nodes", []) if n.get("node_type") == 1 and n.get("id") in valid_vehicle_ids]
     junction_nodes = [n for n in snapshot.get("nodes", []) if n.get("node_type") == 0]
     edges = snapshot.get("edges", [])
 
@@ -264,7 +308,6 @@ def convert_snapshot(snapshot_path, label_path, out_graph_path, stats, feature_d
     v_feats, v_route_indices, vehicle_ids = process_vehicle_nodes(vehicle_nodes, stats, feature_dim)
     j_feats, junction_ids = process_junction_nodes(junction_nodes, stats, feature_dim)
     e_feats, edge_ids = process_edge_entities(edges, stats, edge_route_counts)
-    label_map = process_labels(labels)
 
     # Combine node features
     all_node_feats = torch.cat([v_feats, j_feats], dim=0)
@@ -330,6 +373,19 @@ def main():
         default="/home/guy/Projects/Traffic/traffic_data_pt",
         help="Output folder for .pt graph files"
     )
+    parser.add_argument(
+    "--filter_outliers",
+    action="store_true",
+    default=True,
+    help="Enable filtering of outliers in ETA labels (default: True)"
+    )
+
+    parser.add_argument(
+        "--normalize_labels",
+        action="store_true",
+        default=True,
+        help="Enable z-score normalization of ETA labels (default: True)"
+    )
     args = parser.parse_args()
 
     os.makedirs(args.out_graph_folder, exist_ok=True)
@@ -340,7 +396,7 @@ def main():
     label_csv = os.path.join(args.eda_folder, "labels_feature_summary.csv")
 
     stats = extract_stats_and_mappings(vehicle_csv, junction_csv, edge_csv, label_csv)
-    layout, feature_dim = get_feature_layout(stats)
+    _, feature_dim = get_feature_layout(stats)
 
     snapshot_files = sorted([f for f in os.listdir(args.snapshots_folder) if f.endswith('.json') and "labels" not in f])
 
@@ -350,7 +406,16 @@ def main():
         label_file = snap_file.replace("step_", "labels_")
         label_path = os.path.join(args.labels_folder, label_file)
         out_graph_path = os.path.join(args.out_graph_folder, snap_file.replace(".json", ".pt"))
-        convert_snapshot(snapshot_path, label_path, out_graph_path, stats, feature_dim)
+        convert_snapshot(
+            snapshot_path,
+            label_path,
+            out_graph_path,
+            stats,
+            feature_dim,
+            normalize_labels=args.normalize_labels,
+            filter_outliers=args.filter_outliers
+        )
+
 
 if __name__ == "__main__":
     main()
