@@ -326,10 +326,8 @@ def convert_snapshot(snapshot_path, label_path, out_graph_path, stats, feature_d
         edge_index = torch.empty((2, 0), dtype=torch.long)
     edge_attrs = e_feats
 
-    eta_mean = stats.get("labels", {}).get("eta", {}).get("mean", 0.0)
-    eta_std = stats.get("labels", {}).get("eta", {}).get("std", 1.0)
     label_tensor = torch.FloatTensor([
-        (label_map.get(vid, -1) - eta_mean) / eta_std for vid in vehicle_ids
+        label_map.get(vid, -1) for vid in vehicle_ids
     ])
 
     data = Data(
