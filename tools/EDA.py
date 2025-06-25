@@ -246,10 +246,17 @@ def summarize_features_for_preprocessing(
     snapshots_folder,
     export_folder="./eda_exports"
 ):
+    from scipy.stats import skew, kurtosis
+    import os
+    import json
+    import pandas as pd
+    import numpy as np
+    from tqdm import tqdm
+
     def _safe_filename(s):
         return "".join(c if c.isalnum() or c in "-_." else "_" for c in str(s))
 
-    def _summarize_features(values):
+    def _summarize_features(values, feature_name=None):
         s = pd.Series(values)
         summary = {
             "count": len(s),
@@ -264,6 +271,12 @@ def summarize_features_for_preprocessing(
             "kurtosis": kurtosis(s, nan_policy="omit"),
             "num_missing": s.isnull().sum(),
             "num_unique": s.nunique(),
+            "normalization": "z-score" if (
+                feature_name and (
+                    feature_name.endswith("_log") or  # <-- only normalize log versions
+                    feature_name in ["speed", "length", "avg_speed"]
+                )
+            ) else None
         }
         if summary["num_unique"] < 20:
             summary["value_counts"] = s.value_counts().to_dict()
@@ -271,11 +284,13 @@ def summarize_features_for_preprocessing(
 
     os.makedirs(export_folder, exist_ok=True)
     all_files = get_snapshot_files(snapshots_folder)
+
     entity_types = {
         "vehicle": lambda node: node.get("node_type") == 1,
         "junction": lambda node: node.get("node_type") == 0,
         "edge": None,  # For "edges" array
     }
+
     for entity, filter_fn in entity_types.items():
         print(f"\nProcessing {entity} features...")
         feature_values = dict()
@@ -288,24 +303,33 @@ def summarize_features_for_preprocessing(
                     items = [n for n in data.get("nodes", []) if filter_fn(n)]
                 for item in items:
                     for k, v in item.items():
+                        # Special handling for vehicles_on_road → count only
+                        if k == "vehicles_on_road":
+                            count = len(v) if isinstance(v, list) else np.nan
+                            feature_values.setdefault("vehicles_on_road_count", []).append(count)
+                            feature_values.setdefault("vehicles_on_road_count_log", []).append(np.log1p(count))
+                            continue
+                        # Default
                         feature_values.setdefault(k, []).append(v)
+
         rows = []
         for feat, vals in feature_values.items():
-            # Skip features that are lists or dicts (complex structures)
+            # Skip complex structures except vehicles_on_road_count (which is now numeric)
             if all(isinstance(v, (list, dict)) or v is None for v in vals):
                 print(f"Skipping complex feature '{feat}' (all values are lists/dicts).")
                 continue
+
             vals_clean = [v if v not in [None, "", "None"] else np.nan for v in vals]
             try:
                 vals_num = pd.to_numeric(pd.Series(vals_clean), errors='coerce')
                 is_numeric = not np.all(np.isnan(vals_num))
             except Exception:
                 is_numeric = False
+                
             if is_numeric:
                 vals_for_stats = vals_num.dropna()
-                summary = _summarize_features(vals_for_stats)
+                summary = _summarize_features(vals_for_stats, feature_name=feat)
             else:
-                # Only keep scalar (hashable) values for categorical stats
                 scalars = [v for v in vals_clean if not isinstance(v, (list, dict))]
                 summary = {
                     "count": len(vals_clean),
@@ -335,6 +359,115 @@ def print_menu(options, prompt="Select an option:"):
         else:
             print("Invalid choice. Try again.")
 
+def analyze_edge_route_counts(snapshots_folder, export_folder="./eda_exports", plot_histogram=True):
+    import os
+    import json
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    from tqdm import tqdm
+    from scipy.stats import skew, kurtosis
+
+    os.makedirs(export_folder, exist_ok=True)
+    all_files = get_snapshot_files(snapshots_folder)
+    edge_counts = {}
+
+    for file in tqdm(all_files, desc="Counting edge routes"):
+        with open(file, 'r') as f:
+            snapshot = json.load(f)
+            vehicle_nodes = [n for n in snapshot.get("nodes", []) if n.get("node_type") == 1]
+            for node in vehicle_nodes:
+                route = node.get("route_left", [])
+                for edge_id in route:
+                    edge_counts[edge_id] = edge_counts.get(edge_id, 0) + 1
+
+    df = pd.DataFrame(list(edge_counts.items()), columns=["edge_id", "route_count"])
+    df["route_count_log"] = np.log1p(df["route_count"])
+    df.sort_values(by="route_count", ascending=False, inplace=True)
+
+    # Stats for raw counts
+    counts = df["route_count"].values
+    stats_raw = {
+        "feature": "edge_route_count",
+        "type": "numeric",
+        "count": len(counts),
+        "mean": float(np.mean(counts)),
+        "std": float(np.std(counts)),
+        "min": int(np.min(counts)),
+        "25%": float(np.percentile(counts, 25)),
+        "median": float(np.median(counts)),
+        "75%": float(np.percentile(counts, 75)),
+        "max": int(np.max(counts)),
+        "skewness": float(skew(counts)),
+        "kurtosis": float(kurtosis(counts)),
+        "num_missing": np.sum(np.isnan(counts)),
+        "num_unique": np.unique(counts).size,
+        "normalization": "z-score"
+    }
+
+    # Stats for log-transformed counts
+    log_counts = df["route_count_log"].values
+    stats_log = {
+        "feature": "edge_route_count_log",
+        "type": "numeric",
+        "count": len(log_counts),
+        "mean": float(np.mean(log_counts)),
+        "std": float(np.std(log_counts)),
+        "min": float(np.min(log_counts)),
+        "25%": float(np.percentile(log_counts, 25)),
+        "median": float(np.median(log_counts)),
+        "75%": float(np.percentile(log_counts, 75)),
+        "max": float(np.max(log_counts)),
+        "skewness": float(skew(log_counts)),
+        "kurtosis": float(kurtosis(log_counts)),
+        "num_missing": np.sum(np.isnan(log_counts)),
+        "num_unique": np.unique(log_counts).size,
+        "normalization": "log"
+    }
+
+    # Save stats
+    stats_df = pd.DataFrame([stats_raw, stats_log])
+    stats_path = os.path.join(export_folder, "edge_route_count_summary.csv")
+    stats_df.to_csv(stats_path, index=False)
+    print(f"Saved edge route counts summary to {stats_path}")
+
+    if plot_histogram:
+        # Histogram (raw)
+        plt.figure()
+        plt.hist(counts, bins=50)
+        plt.title("Histogram of edge_route_count")
+        plt.xlabel("Vehicle count per edge")
+        plt.ylabel("Frequency")
+        plt.savefig(os.path.join(export_folder, "edge_route_count_histogram.png"))
+        plt.close()
+
+        # Histogram (log)
+        plt.figure()
+        plt.hist(log_counts, bins=50)
+        plt.title("Histogram of edge_route_count_log")
+        plt.xlabel("log(1 + vehicle count)")
+        plt.ylabel("Frequency")
+        plt.savefig(os.path.join(export_folder, "edge_route_count_log_histogram.png"))
+        plt.close()
+
+        # Boxplot (raw)
+        plt.figure()
+        plt.boxplot(counts, vert=False)
+        plt.title("Boxplot of edge_route_count")
+        plt.xlabel("Vehicle count per edge")
+        plt.savefig(os.path.join(export_folder, "edge_route_count_boxplot.png"))
+        plt.close()
+
+        # Boxplot (log)
+        plt.figure()
+        plt.boxplot(log_counts, vert=False)
+        plt.title("Boxplot of edge_route_count_log")
+        plt.xlabel("log(1 + vehicle count)")
+        plt.savefig(os.path.join(export_folder, "edge_route_count_log_boxplot.png"))
+        plt.close()
+
+        print(f"Saved plots to {export_folder}/")
+
 def main():
     parser = argparse.ArgumentParser(description="Traffic Simulation EDA Toolset")
     parser.add_argument(
@@ -361,6 +494,7 @@ def main():
             "Analyze Feature Distribution",
             "Summarize All Input Features for Preprocessing",
             "Summarize Label Features for Preprocessing",
+            "Analyze edge route counts for Preprocessing",
             "Exit"
         ]
         main_choice = print_menu(main_options, "Choose action")
@@ -383,7 +517,11 @@ def main():
             else:
                 print("No labels folder specified. Skipping label summary.")
             continue
-
+        elif main_choice == 3:  # Analyze edge route counts
+            print("\nAnalyzing edge route counts for preprocessing...")
+            analyze_edge_route_counts(args.snapshots_folder)
+            print("Edge route counts analysis complete. Check ./eda_exports/")
+            continue
         # Entity selection
         print("\nSelect entity for feature analysis:")
         entity_options = [
