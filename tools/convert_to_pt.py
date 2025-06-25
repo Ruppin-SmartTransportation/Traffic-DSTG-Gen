@@ -8,6 +8,7 @@ import argparse
 from torch_geometric.data import Data
 from tqdm import tqdm
 import datetime
+import math
 
 # =======================
 # Utility: Extract EDA stats & mappings
@@ -16,7 +17,8 @@ def extract_stats_and_mappings(
     vehicle_csv_path,
     junction_csv_path,
     edge_csv_path, 
-    label_csv_path
+    label_csv_path,
+    edge_route_counts_csv_path
 ):
     def parse_counts(val):
         try:
@@ -69,6 +71,15 @@ def extract_stats_and_mappings(
     process_csv(vehicle_csv_path, 'vehicle')
     process_csv(junction_csv_path, 'junction')
     process_csv(edge_csv_path, 'edge')
+    process_csv(edge_route_counts_csv_path, 'edge')
+    print("Feature stats extracted:")
+    for group, feats in feature_stats.items():
+        print(f"{group}: {len(feats)} features")
+        for feat, entry in feats.items():
+            if 'mapping' in entry:
+                print(f"  {feat}: {len(entry['mapping'])} unique values")
+            else:
+                print(f"  {feat}: mean={entry.get('mean', 0.0)}, std={entry.get('std', 1.0)}")
     return feature_stats
 
 # =======================
@@ -230,15 +241,50 @@ def process_junction_nodes(junction_nodes, stats, feature_dim):
 
 def process_edge_entities(edge_list, stats, edge_route_counts):
     estats = stats['edge']
+    max_lanes = 3  # One-hot range for num_lanes ∈ {1,2,3}
     features = []
     edge_ids = []
+
     for edge in edge_list:
-        length = (edge.get("length", 0.0) - estats['length']['mean']) / estats['length']['std'] if 'length' in estats else 0.0
-        speed = (edge.get("speed", 0.0) - estats['speed']['mean']) / estats['speed']['std'] if 'speed' in estats else 0.0
-        count = edge_route_counts.get(edge.get("id"), 0)
-        feat = [length, speed, float(count)]
+        # 1. Normalized avg_speed
+        avg_speed = edge.get("avg_speed", 0.0)
+        if 'avg_speed' in estats:
+            mean = estats['avg_speed']['mean']
+            std = estats['avg_speed']['std'] or 1.0
+            avg_speed = (avg_speed - mean) / std
+        else:
+            avg_speed = 0.0
+
+        # 2. One-hot encode num_lanes
+        num_lanes = int(edge.get("num_lanes", 1))
+        one_hot_lanes = [1 if i == num_lanes else 0 for i in range(1, max_lanes + 1)]
+
+        # 3. vehicles_on_road_count → log + z-score normalization
+        vlist = edge.get("vehicles_on_road", [])
+        vcount = len(vlist)
+        vcount_log = math.log1p(vcount)
+        if 'vehicles_on_road_count' in estats:
+            mean = estats['vehicles_on_road_count_log']['mean']
+            std = estats['vehicles_on_road_count_log']['std'] or 1.0
+            vcount_norm = (vcount_log - mean) / std
+        else:
+            vcount_norm = 0.0
+
+        # 4. edge_route_count → log + z-score normalization
+        route_count = edge_route_counts.get(edge.get("id"), 0)
+        route_count_log = math.log1p(route_count)
+        if 'edge_route_count_log' in estats:
+            mean = estats['edge_route_count_log']['mean']
+            std = estats['edge_route_count_log']['std'] or 1.0
+            route_count_norm = (route_count_log - mean) / std
+        else:
+            route_count_norm = 0.0
+
+        # Compose final feature vector
+        feat = [avg_speed] + one_hot_lanes + [vcount_norm, route_count_norm]
         edge_ids.append(edge.get("id"))
         features.append(feat)
+
     return torch.FloatTensor(features), edge_ids
 
 def process_labels(label_list, stats, normalize_labels, filter_outliers):
@@ -392,8 +438,9 @@ def main():
     junction_csv = os.path.join(args.eda_folder, "junction_feature_summary.csv")
     edge_csv = os.path.join(args.eda_folder, "edge_feature_summary.csv")
     label_csv = os.path.join(args.eda_folder, "labels_feature_summary.csv")
+    edge_route_counts_csv = os.path.join(args.eda_folder, "edge_route_count_summary.csv")
 
-    stats = extract_stats_and_mappings(vehicle_csv, junction_csv, edge_csv, label_csv)
+    stats = extract_stats_and_mappings(vehicle_csv, junction_csv, edge_csv, label_csv, edge_route_counts_csv)
     _, feature_dim = get_feature_layout(stats)
 
     snapshot_files = sorted([f for f in os.listdir(args.snapshots_folder) if f.endswith('.json') and "labels" not in f])
