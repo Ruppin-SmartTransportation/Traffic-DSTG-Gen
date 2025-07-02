@@ -1072,3 +1072,30 @@ class SimManager:
     def save_labels_file(self, filename="ground_truth.json"):
         with open(filename, "w") as f:
             json.dump(self.ground_truth_labels, f, indent=2)
+
+    def generate_id_mapping_files(self, mapping_dir="mappings"):
+        """
+        Generates mapping files for vehicles, junctions, and roads.
+        Each file contains a mapping from IDs to their respective attributes.
+        """
+        os.makedirs(mapping_dir, exist_ok=True)
+
+        # Vehicles
+        vehicle_mapping = {v.id: v.to_dict() for v in self.db.vehicles.values()}
+        with open(os.path.join(mapping_dir, "vehicle_mapping.json"), "w") as f:
+            json.dump(vehicle_mapping, f, indent=2)
+
+        # Junctions
+        junction_mapping = {j.id: j.to_dict() for j in self.db.junctions.values()}
+        with open(os.path.join(mapping_dir, "junction_mapping.json"), "w") as f:
+            json.dump(junction_mapping, f, indent=2)
+
+        # Roads
+        edge_mapping = {r.id: r.to_dict() for r in self.db.roads.values()}
+        with open(os.path.join(mapping_dir, "edge_mapping.json"), "w") as f:
+            json.dump(edge_mapping, f, indent=2)
+        
+        print(f"ID mappings saved to {mapping_dir}/")
+        print(f"Total vehicles: {len(self.db.vehicles)}")
+        print(f"Total junctions: {len(self.db.junctions)}")
+        print(f"Total roads: {len(self.db.roads)}")

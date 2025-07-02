@@ -26,6 +26,9 @@ if __name__ == "__main__":
     # Load SUMO network
     net = sumo_net.readNet(args.net)
     snapshot_dir = config.get("snapshot_dir", "traffic_data")
+    if not snapshot_dir:
+        snapshot_dir = "traffic_data"
+    mapping_dir = "eda_export/mappings"
     labels_file = os.path.join(snapshot_dir, "labels.json")
     snapshot_interval = config.get("snapshot_interval_sec", 60)
     # Initialize and load simulation
@@ -34,6 +37,8 @@ if __name__ == "__main__":
     sim.populate_vehicles_from_config(config)
     sim.schedule_from_config(config)
     sim.clear_roads_and_zones()
+    sim.generate_id_mapping_files(mapping_dir)
+    exit(0)  # Exit early if only generating mappings
     # Launch SUMO with TraCI
     sumo_cmd = [sumo_binary, "-c", args.sumocfg, "--start"]
     limit = sim.calculate_simulation_limit(config)
