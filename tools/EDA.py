@@ -360,68 +360,77 @@ def print_menu(options, prompt="Select an option:"):
             print("Invalid choice. Try again.")
 
 def analyze_edge_route_counts(snapshots_folder, export_folder="./eda_exports", plot_histogram=True):
-    import os
-    import json
-    import numpy as np
-    import pandas as pd
-    import matplotlib.pyplot as plt
-    from tqdm import tqdm
-    from scipy.stats import skew, kurtosis
 
     os.makedirs(export_folder, exist_ok=True)
     all_files = get_snapshot_files(snapshots_folder)
-    edge_counts = {}
+    if not all_files:
+        print("No snapshot files found.")
+        return
 
-    for file in tqdm(all_files, desc="Counting edge routes"):
+    per_snapshot_counts = []
+    per_snapshot_logs = []
+    edge_ids = set()
+
+    for file in tqdm(all_files, desc="Processing snapshots"):
         with open(file, 'r') as f:
             snapshot = json.load(f)
-            vehicle_nodes = [n for n in snapshot.get("nodes", []) if n.get("node_type") == 1]
-            for node in vehicle_nodes:
-                route = node.get("route_left", [])
-                for edge_id in route:
-                    edge_counts[edge_id] = edge_counts.get(edge_id, 0) + 1
 
-    df = pd.DataFrame(list(edge_counts.items()), columns=["edge_id", "route_count"])
-    df["route_count_log"] = np.log1p(df["route_count"])
-    df.sort_values(by="route_count", ascending=False, inplace=True)
+        edges = snapshot.get("edges", [])
+        current_edge_ids = {edge["id"] for edge in edges}
+        edge_ids |= current_edge_ids
+        edge_counts = {edge_id: 0 for edge_id in current_edge_ids}
 
-    # Stats for raw counts
-    counts = df["route_count"].values
+        vehicle_nodes = [n for n in snapshot.get("nodes", []) if n.get("node_type") == 1]
+        for node in vehicle_nodes:
+            route = node.get("route_left", [])
+            for edge_id in route:
+                if edge_id in edge_counts:
+                    edge_counts[edge_id] += 1
+
+        counts = np.array(list(edge_counts.values()))
+        logs = np.log1p(counts)
+        per_snapshot_counts.append(counts)
+        per_snapshot_logs.append(logs)
+
+    # Flatten
+    all_counts = np.concatenate(per_snapshot_counts)
+    all_logs = np.concatenate(per_snapshot_logs)
+
+    # === Raw stats ===
     stats_raw = {
         "feature": "edge_route_count",
         "type": "numeric",
-        "count": len(counts),
-        "mean": float(np.mean(counts)),
-        "std": float(np.std(counts)),
-        "min": int(np.min(counts)),
-        "25%": float(np.percentile(counts, 25)),
-        "median": float(np.median(counts)),
-        "75%": float(np.percentile(counts, 75)),
-        "max": int(np.max(counts)),
-        "skewness": float(skew(counts)),
-        "kurtosis": float(kurtosis(counts)),
-        "num_missing": np.sum(np.isnan(counts)),
-        "num_unique": np.unique(counts).size,
+        "count": len(all_counts),
+        "mean": float(np.mean(all_counts)),
+        "std": float(np.std(all_counts)),
+        "min": float(np.min(all_counts)),
+        "25%": float(np.percentile(all_counts, 25)),
+        "median": float(np.median(all_counts)),
+        "75%": float(np.percentile(all_counts, 75)),
+        "max": float(np.max(all_counts)),
+        "skewness": float(skew(all_counts)),
+        "kurtosis": float(kurtosis(all_counts)),
+        "num_missing": int(np.sum(np.isnan(all_counts))),
+        "num_unique": int(np.unique(all_counts).size),
         "normalization": "z-score"
     }
 
-    # Stats for log-transformed counts
-    log_counts = df["route_count_log"].values
+    # === Log stats ===
     stats_log = {
         "feature": "edge_route_count_log",
         "type": "numeric",
-        "count": len(log_counts),
-        "mean": float(np.mean(log_counts)),
-        "std": float(np.std(log_counts)),
-        "min": float(np.min(log_counts)),
-        "25%": float(np.percentile(log_counts, 25)),
-        "median": float(np.median(log_counts)),
-        "75%": float(np.percentile(log_counts, 75)),
-        "max": float(np.max(log_counts)),
-        "skewness": float(skew(log_counts)),
-        "kurtosis": float(kurtosis(log_counts)),
-        "num_missing": np.sum(np.isnan(log_counts)),
-        "num_unique": np.unique(log_counts).size,
+        "count": len(all_logs),
+        "mean": float(np.mean(all_logs)),
+        "std": float(np.std(all_logs)),
+        "min": float(np.min(all_logs)),
+        "25%": float(np.percentile(all_logs, 25)),
+        "median": float(np.median(all_logs)),
+        "75%": float(np.percentile(all_logs, 75)),
+        "max": float(np.max(all_logs)),
+        "skewness": float(skew(all_logs)),
+        "kurtosis": float(kurtosis(all_logs)),
+        "num_missing": int(np.sum(np.isnan(all_logs))),
+        "num_unique": int(np.unique(all_logs).size),
         "normalization": "log"
     }
 
@@ -429,44 +438,42 @@ def analyze_edge_route_counts(snapshots_folder, export_folder="./eda_exports", p
     stats_df = pd.DataFrame([stats_raw, stats_log])
     stats_path = os.path.join(export_folder, "edge_route_count_summary.csv")
     stats_df.to_csv(stats_path, index=False)
-    print(f"Saved edge route counts summary to {stats_path}")
+    print(f"✅ Saved edge route counts summary to {stats_path}")
 
+    # Optional: histograms and boxplots
     if plot_histogram:
-        # Histogram (raw)
         plt.figure()
-        plt.hist(counts, bins=50)
+        plt.hist(all_counts, bins=50)
         plt.title("Histogram of edge_route_count")
         plt.xlabel("Vehicle count per edge")
         plt.ylabel("Frequency")
         plt.savefig(os.path.join(export_folder, "edge_route_count_histogram.png"))
         plt.close()
 
-        # Histogram (log)
         plt.figure()
-        plt.hist(log_counts, bins=50)
+        plt.hist(all_logs, bins=50)
         plt.title("Histogram of edge_route_count_log")
         plt.xlabel("log(1 + vehicle count)")
         plt.ylabel("Frequency")
         plt.savefig(os.path.join(export_folder, "edge_route_count_log_histogram.png"))
         plt.close()
 
-        # Boxplot (raw)
         plt.figure()
-        plt.boxplot(counts, vert=False)
+        plt.boxplot(all_counts, vert=False)
         plt.title("Boxplot of edge_route_count")
         plt.xlabel("Vehicle count per edge")
         plt.savefig(os.path.join(export_folder, "edge_route_count_boxplot.png"))
         plt.close()
 
-        # Boxplot (log)
         plt.figure()
-        plt.boxplot(log_counts, vert=False)
+        plt.boxplot(all_logs, vert=False)
         plt.title("Boxplot of edge_route_count_log")
         plt.xlabel("log(1 + vehicle count)")
         plt.savefig(os.path.join(export_folder, "edge_route_count_log_boxplot.png"))
         plt.close()
 
-        print(f"Saved plots to {export_folder}/")
+        print(f"📊 Saved visualizations to {export_folder}/")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Traffic Simulation EDA Toolset")

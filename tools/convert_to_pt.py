@@ -13,12 +13,44 @@ import math
 # =======================
 # Utility: Extract EDA stats & mappings
 # =======================
+EXPECTED_NODE_FEATURE_DIM = 20  #
+EXPECTED_ZONE_CLASSES = 4
+EXPECTED_JUNCTION_TYPE_CLASSES = 2
+EXPECTED_VEHICLE_LENGTH_CLASSES = 3
+
+'''
+node feature layout:
+
+| Index | Feature Name        | Notes                                                   |
+| ----- | ------------------- | ------------------------------------------------------- |
+| 0     | `node_type`         | 0 = junction    1 = vehicle                             |
+| 1-3   | `length_oh`         | Always `[0, 0, 0]` for junctions                        |
+| 4     | `speed`             |                                                         |
+| 5     | `acceleration`      |                                                         |
+| 6     | `current_x`         |                                                         |
+| 7     | `current_y`         |                                                         |
+| 8-11  | `zone_oh`           | One-hot of zone (4 zones = 4 dims)                      |
+| 12    | `current_edge`      |                                                         |
+| 13    | `current_position`  |                                                         |
+| 14    | `sin_hour`          |                                                         |
+| 15    | `cos_hour`          |                                                         |
+| 16    | `sin_day`           |                                                         |
+| 17    | `cos_day`           |                                                         |
+| 18    | `route_length`      |                                                         |
+| 19    | `route_length_left` |                                                         |
+| 20    | `j_type`              | junction type, "priority", "traffic_light"  |
+
+
+'''
+
+
 def extract_stats_and_mappings(
     vehicle_csv_path,
     junction_csv_path,
-    edge_csv_path, 
+    edge_csv_path,
     label_csv_path,
-    edge_route_counts_csv_path
+    edge_route_counts_csv_path,
+    mapping_folder
 ):
     def parse_counts(val):
         try:
@@ -29,9 +61,34 @@ def extract_stats_and_mappings(
             return {}
 
     feature_stats = {'vehicle': {}, 'junction': {}, 'edge': {}, 'labels': {}}
+    # Load mappings from JSON files
+    vehicle_mapping_path = os.path.join(mapping_folder, "vehicle_mapping.json")
+    junction_mapping_path = os.path.join(mapping_folder, "junction_mapping.json")
+    edge_mapping_path = os.path.join(mapping_folder, "edge_mapping.json")
 
+    # make sure the mapping files exists
+    if not os.path.exists(vehicle_mapping_path):
+        print(f"Warning: Vehicle mapping file '{vehicle_mapping_path}' not found.")
+    else:
+        with open(vehicle_mapping_path, 'r') as f:
+            vehicle_data_map = json.load(f)
+            print(f"Loaded vehicle  mapping: {len(vehicle_data_map)} entries")
+    if not os.path.exists(junction_mapping_path):
+        print(f"Warning: Junction mapping file '{junction_mapping_path}' not found.")
+    else:
+        with open(junction_mapping_path, 'r') as f:
+            junction_data_map = json.load(f)
+            print(f"Loaded junction mapping: {len(junction_data_map)} entries")
+    if not os.path.exists(edge_mapping_path):
+        print(f"Warning: Edge mapping file '{edge_mapping_path}' not found.")
+    else:       
+        with open(edge_mapping_path, 'r') as f:
+            edge_data_map = json.load(f)
+            print(f"Loaded edge mapping: {len(edge_data_map)} entries")
+
+
+    # === LABEL STATS ===
     df = pd.read_csv(label_csv_path)
-    feature_stats['labels'] = {}
     for _, row in df.iterrows():
         feat = row['feature']
         entry = {
@@ -40,76 +97,86 @@ def extract_stats_and_mappings(
         }
         feature_stats['labels'][feat] = entry
 
-    def process_csv(path, group):
+    # === PROCESS FEATURE CSVS ===
+    def process_csv(path, group, id_mapping = None):
         df = pd.read_csv(path)
         for _, row in df.iterrows():
             feat = row['feature']
+            if feat in feature_stats[group]:
+                print(f"Warning: Overwriting feature '{feat}' in group '{group}'")
+
             entry = {}
+
+            # Handle numeric features
             if row['type'] == 'numeric':
                 entry['mean'] = float(row.get('mean', 0.0))
                 entry['std'] = float(row.get('std', 1.0)) if float(row.get('std', 1.0)) > 0 else 1.0
-            # Always create mapping for 'length' in vehicles as categorical!
-            if (group == 'vehicle' and feat == 'length'):
+                entry['min'] = float(row.get('min', 0.0))
+                entry['max'] = float(row.get('max', 1.0))
+
+            # Special handling for vehicle length (categorical mapping)
+            if group == 'vehicle' and feat == 'length':
                 counts = parse_counts(row.get('value_counts', ''))
                 if counts:
                     vals = sorted(float(k) for k in counts.keys())
                 else:
                     vals = sorted(set([
-                        float(row['min']),
-                        float(row['max']),
-                        float(row['25%']),
-                        float(row['median']),
-                        float(row['75%'])
+                        float(row.get('min', 0.0)),
+                        float(row.get('25%', 0.0)),
+                        float(row.get('median', 0.0)),
+                        float(row.get('75%', 0.0)),
+                        float(row.get('max', 0.0))
                     ]))
                 entry['mapping'] = {v: i for i, v in enumerate(vals)}
+
+            # Handle categorical features
             elif row['type'] == 'categorical':
                 counts = parse_counts(row.get('value_counts', ''))
                 vals = sorted(counts.keys()) if counts else []
                 entry['mapping'] = {v: i for i, v in enumerate(vals)}
             feature_stats[group][feat] = entry
+        # Handle ID mappings
+        if id_mapping is not None:
+            ids = sorted(id_mapping.keys())
+            if group == 'junction':
+                vehicle_offset = len(feature_stats['vehicle']) if 'vehicle' in feature_stats else 0
+                if vehicle_offset == 0:
+                    print("Warning: No vehicle features found, using empty mapping.")
+                    exit(1)
+                feature_stats[group]['id'] = {
+                    'mapping': {v: i+vehicle_offset for i, v in enumerate(ids)}
+                }
+            else:
+                feature_stats[group]['id'] = {
+                    'mapping': {v: i for i, v in enumerate(ids)}
+                }
 
-    process_csv(vehicle_csv_path, 'vehicle')
-    process_csv(junction_csv_path, 'junction')
-    process_csv(edge_csv_path, 'edge')
-    process_csv(edge_route_counts_csv_path, 'edge')
+    # Process all groups
+    process_csv(vehicle_csv_path, 'vehicle', vehicle_data_map)
+    process_csv(junction_csv_path, 'junction', junction_data_map)
+    process_csv(edge_csv_path, 'edge', edge_data_map)
+    process_csv(edge_route_counts_csv_path, 'edge')  # May overwrite some edge features
+
+    # === SUMMARY ===
     print("Feature stats extracted:")
     for group, feats in feature_stats.items():
         print(f"{group}: {len(feats)} features")
+        # print one of each feature
         for feat, entry in feats.items():
             if 'mapping' in entry:
                 print(f"  {feat}: {len(entry['mapping'])} unique values")
             else:
-                print(f"  {feat}: mean={entry.get('mean', 0.0)}, std={entry.get('std', 1.0)}")
-    return feature_stats
+                print(f"  {feat}: mean={entry.get('mean', 0.0):.4f}, std={entry.get('std', 1.0):.4f}")
+        # Uncomment to print all features
+        # print(f"  {feat}: {entry}")
+        # print(f"  {feat}: {entry.get('mean', 0.0):.4f}, std={entry.get('std', 1.0):.4f}")
+        # print(f"  {feat}: {entry.get('min', 0.0):.4f}, max={entry.get('max', 1.0):.4f}")
+        # print(f"  {feat}: {entry.get('mapping', {})}")  # Uncomment to print all mappings
+        # print(f"  {feat}: {entry.get('value_counts', {})}")  # Uncomment to print all value counts
 
-# =======================
-# Feature Vector Layout
-# =======================
-def get_feature_layout(stats):
-    n_length = len(stats['vehicle']['length']['mapping'])
-    n_zone = len(stats['vehicle']['current_zone']['mapping'])
-    n_type = len(stats['junction']['type']['mapping']) if 'type' in stats['junction'] else 0
-    layout = {
-        'n_length': n_length,
-        'n_zone': n_zone,
-        'n_type': n_type,
-        'vehicle': [
-            'node_type', 'length_oh', 'speed', 'acceleration', 'current_x', 'current_y',
-            'zone_oh', 'edge_idx', 'current_position',
-            'sin_hour', 'cos_hour', 'sin_day', 'cos_day',
-            'route_length', 'route_length_left', 'type_oh'
-        ],
-        'junction': [
-            'node_type', 'length_oh', 'speed', 'acceleration', 'current_x', 'current_y',
-            'zone_oh', 'edge_idx', 'current_position',
-            'sin_hour', 'cos_hour', 'sin_day', 'cos_day',
-            'route_length', 'route_length_left', 'type_oh'
-        ],
-    }
-    feature_dim = (
-        1 + n_length + 4 + n_zone + 1 + 1 + 4 + 2 + n_type
-    )
-    return layout, feature_dim
+
+
+    return feature_stats
 
 # =======================
 # Compute edge route demand
@@ -128,27 +195,27 @@ def compute_edge_route_counts(vehicle_nodes):
 # =======================
 # Processing Functions
 # =======================
-def process_vehicle_nodes(vehicle_nodes, stats, feature_dim):
+def process_vehicle_nodes(vehicle_nodes, stats):
     vstats = stats['vehicle']
-    length_map = vstats['length']['mapping']
-    zone_map = vstats['current_zone']['mapping']
-    edge_map = stats['edge']['id']['mapping']
-
-    n_length = len(length_map)
-    n_zone = len(zone_map)
-    n_type = len(stats['junction']['type']['mapping']) if 'type' in stats['junction'] else 0
-
     features = []
-    route_indices = []
-    vehicle_ids = []
+    curr_route_indices = []
+    curr_vehicle_ids = []
+    vehicle_length_map = {4.5: 0, 8.0: 1, 12.0: 2}
+    n_length = len(vehicle_length_map)
+    edge_map = stats['edge']['id']['mapping'] if 'edge' in stats and 'id' in stats['edge'] and 'mapping' in stats['edge']['id'] else {}
+    if edge_map is None or len(edge_map) == 0:
+        print("Warning: Edge mapping is empty or not found, using default empty mapping.")
+        exit(1)
+
+    global zone_map, n_zone
 
     for node in vehicle_nodes:
         feat = []
         feat.append(1)
         length_oh = [0] * n_length
         lval = float(node.get("length", 0.0))
-        if lval in length_map:
-            length_oh[length_map[lval]] = 1
+        if lval in vehicle_length_map:
+            length_oh[vehicle_length_map[lval]] = 1
         feat.extend(length_oh)
         for key in ['speed', 'acceleration', 'current_x', 'current_y']:
             mean = vstats[key]['mean']
@@ -160,8 +227,10 @@ def process_vehicle_nodes(vehicle_nodes, stats, feature_dim):
         if zval in zone_map:
             zone_oh[zone_map[zval]] = 1
         feat.extend(zone_oh)
-        edge_idx = edge_map.get(node.get("current_edge"), 0)
-        feat.append(edge_idx)
+        # edge_idx = edge_map.get(node.get("current_edge"), -1)
+        # if edge_idx == -1:
+        #     print(f"Warning: Edge {node.get('current_edge')} not found in edge mapping, using index 0.")
+        # feat.append(edge_idx)
         mean = vstats['current_position']['mean']
         std = vstats['current_position']['std']
         curr_pos = (node.get("current_position", 0.0) - mean) / std
@@ -187,57 +256,50 @@ def process_vehicle_nodes(vehicle_nodes, stats, feature_dim):
             std = vstats[key]['std']
             value = (node.get(key, 0.0) - mean) / std
             feat.append(value)
-        feat.extend([0] * n_type)
-        if len(feat) < feature_dim:
-            feat += [0] * (feature_dim - len(feat))
-        elif len(feat) > feature_dim:
-            feat = feat[:feature_dim]
+
+        if len(feat) < EXPECTED_NODE_FEATURE_DIM:
+            feat += [0] * (EXPECTED_NODE_FEATURE_DIM - len(feat))
+            
         features.append(feat)
-        edge_map = stats['edge']['id']['mapping']
+        
         route_raw = node.get("route", [])
-        route_idx_list = [edge_map.get(eid, 0) for eid in route_raw]
-        route_indices.append(route_idx_list)
-        vehicle_ids.append(node.get("id"))
-    return torch.FloatTensor(features), route_indices, vehicle_ids
+        route_idx_list = [edge_map.get(eid, -1) for eid in route_raw]
+        if -1 in route_idx_list:
+            print(f"Warning: Some edges in route {route_raw} not found in edge mapping.")
+            # print the missing edges
+            missing_edges = [eid for eid in route_raw if eid not in edge_map]
+            print(f"Missing edges: {missing_edges}")
+            exit(1)
+        curr_route_indices.append(route_idx_list)
+        curr_vehicle_ids.append(node.get("id"))
+    return torch.FloatTensor(features), curr_route_indices, curr_vehicle_ids
 
-def process_junction_nodes(junction_nodes, stats, feature_dim):
-    jstats = stats['junction']
-    zone_map = jstats['zone']['mapping'] if 'zone' in jstats and 'mapping' in jstats['zone'] else {}
-    type_map = jstats['type']['mapping'] if 'type' in jstats and 'mapping' in jstats['type'] else {}
-
-    n_length = len(stats['vehicle']['length']['mapping'])
-    n_zone = len(zone_map)
-    n_type = len(type_map)
-
+def process_junction_nodes(junction_nodes, stats):
+    
     features = []
-    junction_ids = []
-
     for node in junction_nodes:
         feat = []
-        feat.append(0)
-        feat.extend([0] * n_length)
-        feat.extend([0, 0, 0, 0])
+        feat.extend([0] * 6)
+        jstats = stats['junction']
+        for key in ['x', 'y']:
+            mean = jstats[key]['mean']
+            std = jstats[key]['std']
+            value = (node.get(key, 0.0) - mean) / std
+            feat.append(value)
+
         zone_oh = [0] * n_zone
         zval = node.get("zone")
         if zval in zone_map:
             zone_oh[zone_map[zval]] = 1
         feat.extend(zone_oh)
-        feat.append(0)
-        feat.append(0)
-        feat.extend([0, 0])
-        feat.extend([0, 0])
-        type_oh = [0] * n_type
-        tval = node.get("type")
-        if tval in type_map:
-            type_oh[type_map[tval]] = 1
-        feat.extend(type_oh)
-        if len(feat) < feature_dim:
-            feat += [0] * (feature_dim - len(feat))
-        elif len(feat) > feature_dim:
-            feat = feat[:feature_dim]
+        feat.extend([0] * 7)
+
+        # Junction type
+        jtype = node.get("type", "priority")
+        feat.append(1 if jtype == "traffic_light" else 0)
+
         features.append(feat)
-        junction_ids.append(node.get("id"))
-    return torch.FloatTensor(features), junction_ids
+    return torch.FloatTensor(features)
 
 def process_edge_entities(edge_list, stats, edge_route_counts):
     estats = stats['edge']
@@ -268,9 +330,10 @@ def process_edge_entities(edge_list, stats, edge_route_counts):
             std = estats['vehicles_on_road_count_log']['std'] or 1.0
             vcount_norm = (vcount_log - mean) / std
         else:
+            print("Warning: 'vehicles_on_road_count_log' stats not found, using default normalization.")
             vcount_norm = 0.0
 
-        # 4. edge_route_count → log + z-score normalization
+        # 4. edge_route_count → log + z-score normalization capped to clip_max
         route_count = edge_route_counts.get(edge.get("id"), 0)
         route_count_log = math.log1p(route_count)
         if 'edge_route_count_log' in estats:
@@ -278,6 +341,7 @@ def process_edge_entities(edge_list, stats, edge_route_counts):
             std = estats['edge_route_count_log']['std'] or 1.0
             route_count_norm = (route_count_log - mean) / std
         else:
+            print("Warning: 'edge_route_count_log' stats not found, using default normalization.")
             route_count_norm = 0.0
 
         # Compose final feature vector
@@ -336,7 +400,7 @@ def process_labels(label_list, stats, normalize_labels, filter_outliers):
 # =======================
 # Main conversion logic
 # =======================
-def convert_snapshot(snapshot_path, label_path, out_graph_path, stats, feature_dim, normalize_labels, filter_outliers):
+def convert_snapshot(snapshot_path, label_path, out_graph_path, stats, normalize_labels, filter_outliers):
 
     with open(snapshot_path, 'r') as f:
         snapshot = json.load(f)
@@ -344,47 +408,71 @@ def convert_snapshot(snapshot_path, label_path, out_graph_path, stats, feature_d
         labels = json.load(f)
     
     label_map, valid_vehicle_ids = process_labels(labels, stats, normalize_labels, filter_outliers)
-    vehicle_nodes = [n for n in snapshot.get("nodes", []) if n.get("node_type") == 1 and n.get("id") in valid_vehicle_ids]
+    curr_vehicle_nodes = [n for n in snapshot.get("nodes", []) if n.get("node_type") == 1 and n.get("id") in valid_vehicle_ids]
     junction_nodes = [n for n in snapshot.get("nodes", []) if n.get("node_type") == 0]
+    junction_ids = [n.get("id") for n in junction_nodes]
+    if len(junction_ids) != len(stats['junction']['id']['mapping'].keys()):
+        print(f"Warning: Junction IDs in snapshot ({len(junction_ids)}) do not match stats mapping ({len(stats['junction']['id']['mapping'])}).")
+        exit(1)
     edges = snapshot.get("edges", [])
 
     # Compute edge route counts using route_left!
-    edge_route_counts = compute_edge_route_counts(vehicle_nodes)
+    curr_edge_route_counts = compute_edge_route_counts(curr_vehicle_nodes)
 
-    v_feats, v_route_indices, vehicle_ids = process_vehicle_nodes(vehicle_nodes, stats, feature_dim)
-    j_feats, junction_ids = process_junction_nodes(junction_nodes, stats, feature_dim)
-    e_feats, edge_ids = process_edge_entities(edges, stats, edge_route_counts)
-
+    v_feats, curr_route_indices, curr_vehicle_ids = process_vehicle_nodes(curr_vehicle_nodes, stats)
+    j_feats = process_junction_nodes(junction_nodes, stats)
+    e_feats, edge_ids = process_edge_entities(edges, stats, curr_edge_route_counts)
+    if len(edge_ids) != len(stats['edge']['id']['mapping'].keys()):
+        print(f"Warning: Edge IDs in snapshot ({len(edge_ids)}) do not match stats mapping ({len(stats['edge']['id']['mapping'])}).")
+        exit(1)
     # Combine node features
     all_node_feats = torch.cat([v_feats, j_feats], dim=0)
-    all_node_ids = vehicle_ids + junction_ids
+    # Create a mapping from node IDs to indices from stats mapping
+    curr_vehicles_id_to_idx = {vid: idx for vid, idx in stats['vehicle']['id']['mapping'].items() if vid in curr_vehicle_ids}
+    junctions_id_to_idx = stats['junction']['id']['mapping']
 
-    node_id_to_idx = {nid: idx for idx, nid in enumerate(all_node_ids)}
+    #append junction_id_to_idx to curr_vehicles_id_to_idx
+    nodes_id_to_idx = {**curr_vehicles_id_to_idx, **junctions_id_to_idx}
+    nodes_idx_list = list(nodes_id_to_idx.values())
+
     edge_index = []
     for edge in edges:
         src_id = edge.get('from')
         tgt_id = edge.get('to')
-        if src_id in node_id_to_idx and tgt_id in node_id_to_idx:
-            edge_index.append([node_id_to_idx[src_id], node_id_to_idx[tgt_id]])
+        if src_id in nodes_id_to_idx and tgt_id in nodes_id_to_idx:
+            edge_index.append([junctions_id_to_idx[src_id], junctions_id_to_idx[tgt_id]])
+        else:
+            print(f"Warning: Edge {src_id} -> {tgt_id} has nodes not in mapping, exit.")
+            print(f"Missing nodes: {src_id} -> {tgt_id}")
+            exit(1)
     if edge_index:
         edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
     else:
-        edge_index = torch.empty((2, 0), dtype=torch.long)
+        print("Warning: No valid edges found in snapshot.")
+        exit(1)
     edge_attrs = e_feats
 
     label_tensor = torch.FloatTensor([
-        label_map.get(vid, -1) for vid in vehicle_ids
+        label_map.get(vid, -1) for vid in curr_vehicle_ids
     ])
+    if len(label_tensor) != len(curr_vehicle_ids):
+        print(f"Warning: Label tensor length ({len(label_tensor)}) does not match vehicle IDs length ({len(curr_vehicle_ids)}).")
+        exit(1)
+    if -1 in label_tensor:
+        print("Warning: Some vehicle IDs do not have labels, exiting.")
+        print(f"Missing labels for vehicle IDs: {[vid for vid in curr_vehicle_ids if vid not in label_map]}")
+        exit(1)
 
     data = Data(
         x=all_node_feats,
+        node_idxs=torch.tensor(nodes_idx_list, dtype=torch.long),
         edge_index=edge_index,
         edge_attr=edge_attrs,
         y=label_tensor,
-        vehicle_ids=vehicle_ids,
+        vehicle_ids=curr_vehicle_ids,
         junction_ids=junction_ids,
         edge_ids=edge_ids,
-        vehicle_routes=v_route_indices
+        vehicle_routes=curr_route_indices
     )
     torch.save(data, out_graph_path)
 
@@ -430,6 +518,14 @@ def main():
         default=True,
         help="Enable z-score normalization of ETA labels (default: True)"
     )
+
+    parser.add_argument(
+        "--mapping_folder",
+        action="store_true",
+        default="mappings",
+        help="Folder with mappings for vehicle, junction, and edge features (default: eda_exports/mappings)"
+    )
+
     args = parser.parse_args()
 
     os.makedirs(args.out_graph_folder, exist_ok=True)
@@ -439,9 +535,12 @@ def main():
     edge_csv = os.path.join(args.eda_folder, "edge_feature_summary.csv")
     label_csv = os.path.join(args.eda_folder, "labels_feature_summary.csv")
     edge_route_counts_csv = os.path.join(args.eda_folder, "edge_route_count_summary.csv")
-
-    stats = extract_stats_and_mappings(vehicle_csv, junction_csv, edge_csv, label_csv, edge_route_counts_csv)
-    _, feature_dim = get_feature_layout(stats)
+    mapping_folder = os.path.join(args.eda_folder, args.mapping_folder)
+    stats_and_id_mapping = extract_stats_and_mappings(vehicle_csv, junction_csv, edge_csv, label_csv, edge_route_counts_csv, mapping_folder)
+    
+    global zone_map, n_zone
+    zone_map = {'A': 0, 'B': 1, 'C': 2, 'H':3}
+    n_zone = len(zone_map)
 
     snapshot_files = sorted([f for f in os.listdir(args.snapshots_folder) if f.endswith('.json') and "labels" not in f])
 
@@ -455,8 +554,7 @@ def main():
             snapshot_path,
             label_path,
             out_graph_path,
-            stats,
-            feature_dim,
+            stats_and_id_mapping,
             normalize_labels=args.normalize_labels,
             filter_outliers=args.filter_outliers
         )
