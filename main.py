@@ -12,12 +12,12 @@ def parse_args():
     parser.add_argument('--config', default="simulation.config.json", help="Path to simulation config JSON file.")
     parser.add_argument('--net', default="simulation/urban_three_zones.net.xml", help="Path to SUMO network file (.net.xml).")
     parser.add_argument('--sumocfg', default="simulation/urban_three_zones.sumocfg", help="Path to SUMO config file (.sumocfg).")
-    parser.add_argument('--sumo-gui', action='store_true', help="Use SUMO GUI (default: False, use CLI)")
+    parser.add_argument('--sumo-gui', action='store_false', help="Use SUMO GUI (default: True, use CLI)")
     return parser.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
-    sumo_binary = "sumo" if args.sumo_gui else "sumo-gui"
+    sumo_binary = "sumo-gui" if args.sumo_gui else "sumo"
     print(f"Using SUMO binary: {sumo_binary}")
     # Load config
     with open(args.config) as f:
@@ -38,7 +38,6 @@ if __name__ == "__main__":
     sim.schedule_from_config(config)
     sim.clear_roads_and_zones()
     sim.generate_id_mapping_files(mapping_dir)
-    exit(0)  # Exit early if only generating mappings
     # Launch SUMO with TraCI
     sumo_cmd = [sumo_binary, "-c", args.sumocfg, "--start"]
     limit = sim.calculate_simulation_limit(config)
