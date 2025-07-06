@@ -778,7 +778,6 @@ class SimManager:
             try:
                 route_result = traci.simulation.findRoute(vehicle.current_edge, destination["edge"])
                 full_route_edges = route_result.edges
-                # print(f"Route from {vehicle.current_edge} to {destination['edge']}: {full_route_edges}")
                 traci.route.add(routeID=route_id, edges=full_route_edges)
                 vehicle.route = list(full_route_edges)
                 vehicle.route_left = list(full_route_edges)
@@ -797,8 +796,6 @@ class SimManager:
                             )
                 if vehicle.is_stagnant:
                     traci.vehicle.setColor(vehicle.id, (255, 255, 255))  # White for stagnant vehicles
-                # print("origin_edge:", vehicle.origin_edge, type(vehicle.origin_edge))
-                # print("origin_position:", vehicle.origin_position, type(vehicle.origin_position))
                 vehicle.origin_x, vehicle.origin_y = traci.simulation.convert2D(vehicle.origin_edge, float(vehicle.origin_position), 0)
                 vehicle.current_x, vehicle.current_y = vehicle.origin_x, vehicle.origin_y
                 vehicle.destination_x, vehicle.destination_y = traci.simulation.convert2D(vehicle.destination_edge, float(vehicle.destination_position), 0)
@@ -810,7 +807,7 @@ class SimManager:
                     exit(1)
                 traci.vehicle.subscribe(vehicle.id, [tc.VAR_ROAD_ID])
                 self.vehicles_in_route.append(vehicle.id)
-                self.log.info(f"[DISPATCHED] {vehicle.id} from {origin_label} to {destination_label} at step {vehicle.origin_step} distance {vehicle.route_length}m.")
+                self.log.info(f"[DISPATCHED] {vehicle.id} from {origin_label} to {destination_label} at step {vehicle.origin_step}={self.convert_seconds_to_time(vehicle.origin_step)} distance {vehicle.route_length}m.")
                 vehicle.status = "in_route"
             except traci.TraCIException as e:
                 print(f"[ERROR] Failed to dispatch {vehicle.id}: {e}")
@@ -1027,9 +1024,10 @@ class SimManager:
                     self.vehicles_in_route.remove(vid)
                     curr_road.remove_vehicle_and_update(vehicle)
                     self.add_ground_truth_label(vehicle)
-                    # print(f"Vehicle {vehicle.id} arrived at destination {vehicle.destination_name} at {self.convert_seconds_to_time(current_step)}.")
-                    self.log.info(f"Vehicle {vehicle.id} arrived at destination {vehicle.destination_name} at {self.convert_seconds_to_time(current_step)}.")
-        
+                    self.log.info(f"Vehicle {vehicle.id} arrived at destination {vehicle.destination_name} at {self.convert_seconds_to_time(current_step)} started {self.convert_seconds_to_time(vehicle.origin_step)} duration {self.convert_seconds_to_time(current_step - vehicle.origin_step)}")
+                    if current_step - vehicle.origin_step > 2 * 60 * 60 :
+                        self.log.warning(f"Vehicle {vehicle.id} travel duration {self.convert_seconds_to_time(current_step - vehicle.origin_step)} exceeds top limit")
+                        print(f"Vehicle {vehicle.id} travel duration {self.convert_seconds_to_time(current_step - vehicle.origin_step)} exceeds top limit")
         if current_step % 300 == 0:
             self.log.info(f"step {current_step} time {self.convert_seconds_to_time(current_step)} vehicles in route: {len(self.vehicles_in_route)}") 
 
