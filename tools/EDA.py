@@ -8,6 +8,7 @@ from scipy.stats import skew, kurtosis
 from tqdm import tqdm
 import argparse
 import sys
+from datetime import datetime, timedelta
 
 SAMPLE_SIZE = 3000  # <-- Set the number of snapshot files to sample
 
@@ -25,6 +26,93 @@ def get_snapshot_files(snapshots_folder):
         all_files = random.sample(all_files, SAMPLE_SIZE)
         print(f"Randomly sampled {SAMPLE_SIZE} snapshot files for analysis.")
     return all_files
+
+def plot_route_distances_over_time(labels_json_path, output_folder="eda_exports"):
+
+    start_day = int(input("Enter start day (0–28): "))
+    start_hour = int(input("Enter start hour (0–24): "))
+    end_day = int(input("Enter end day (exclusive, 0–28): "))
+    end_hour = int(input("Enter end hour (exclusive, 0–24): "))
+
+    start_sec = start_day * 86400 + start_hour * 3600
+    end_sec = end_day * 86400 + end_hour * 3600
+
+    times = []
+    distances_km = []
+
+    with open(labels_json_path) as f:
+        labels = json.load(f)
+    for entry in labels:
+        t = entry.get("origin_time_sec", 0)
+        if start_sec <= t < end_sec:
+            times.append(datetime.utcfromtimestamp(t))
+            distances_km.append(entry.get("initial_route_length", 0.0) / 1000.0)
+
+    if not times:
+        print("No entries found for the specified time window.")
+        return
+
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(times, distances_km, '.', alpha=0.5)
+    plt.title("Route Distance over Time")
+    plt.xlabel("Time")
+    plt.ylabel("Distance (km)")
+
+    plt.subplot(1, 2, 2)
+    plt.hist(distances_km, bins=30, color='skyblue', edgecolor='black')
+    plt.title("Histogram of Route Distances")
+    plt.xlabel("Distance (km)")
+    plt.ylabel("Frequency")
+
+    plt.tight_layout()
+    plt.show()
+    fname = os.path.join(output_folder, "route_distances_over_time.pdf")
+    plt.savefig(fname)
+
+def plot_travel_durations_over_time(labels_json_path, output_folder="eda_exports"):
+    
+    start_day = int(input("Enter start day (0–28): "))
+    start_hour = int(input("Enter start hour (0–24): "))
+    end_day = int(input("Enter end day (exclusive, 0–28): "))
+    end_hour = int(input("Enter end hour (exclusive, 0–24): "))
+
+    start_sec = start_day * 86400 + start_hour * 3600
+    end_sec = end_day * 86400 + end_hour * 3600
+
+    times = []
+    durations_min = []
+    
+    with open(labels_json_path) as f:
+        labels = json.load(f)
+
+    for entry in labels:
+        t = entry.get("origin_time_sec", 0)
+        if start_sec <= t < end_sec:
+            times.append(datetime.utcfromtimestamp(t))
+            durations_min.append(entry.get("total_travel_time_seconds", 0) / 60.0)
+
+    if not times:
+        print("No entries found for the specified time window.")
+        return
+
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(times, durations_min, '.', alpha=0.5)
+    plt.title("Travel Duration over Time")
+    plt.xlabel("Time")
+    plt.ylabel("Duration (min)")
+
+    plt.subplot(1, 2, 2)
+    plt.hist(durations_min, bins=30, color='orange', edgecolor='black')
+    plt.title("Histogram of Travel Durations")
+    plt.xlabel("Duration (min)")
+    plt.ylabel("Frequency")
+
+    plt.tight_layout()
+    plt.show()
+    fname = os.path.join(output_folder, "travel_durations_over_time.pdf")
+    plt.savefig(fname)
 
 def analyze_feature_distribution(
     snapshots_folder,
@@ -498,10 +586,12 @@ def main():
     while True:
         print("\nMain Menu:")
         main_options = [
-            "Analyze Feature Distribution",
             "Summarize All Input Features for Preprocessing",
             "Summarize Label Features for Preprocessing",
             "Analyze edge route counts for Preprocessing",
+            "Analyze Feature Distribution",
+            "plot_route_distances_over_time",
+            "plot_travel_durations_over_time",
             "Exit"
         ]
         main_choice = print_menu(main_options, "Choose action")
@@ -510,13 +600,13 @@ def main():
             print("Goodbye!")
             sys.exit(0)
 
-        elif main_choice == 1:  # Summarize all features
+        elif main_choice == 0:  # Summarize all features
             print("\nGenerating comprehensive summary for all features. This may take a few minutes...")
             summarize_features_for_preprocessing(args.snapshots_folder)
             print("Feature summaries exported to ./eda_exports/")
             continue
 
-        elif main_choice == 2:  # Summarize labels
+        elif main_choice == 1:  # Summarize labels
             print("\nGenerating label feature summary. This may take a few minutes...")
             if args.labels_folder:
                 summarize_labels(args.labels_folder)
@@ -524,61 +614,69 @@ def main():
             else:
                 print("No labels folder specified. Skipping label summary.")
             continue
-        elif main_choice == 3:  # Analyze edge route counts
+        elif main_choice == 2:  # Analyze edge route counts
             print("\nAnalyzing edge route counts for preprocessing...")
             analyze_edge_route_counts(args.snapshots_folder)
             print("Edge route counts analysis complete. Check ./eda_exports/")
             continue
-        # Entity selection
-        print("\nSelect entity for feature analysis:")
-        entity_options = [
-            "Vehicle features",
-            "Junction features",
-            "Road features (edges)"
-        ]
-        entity_map = ["vehicle", "junction", "edge"]
-        entity_choice = print_menu(entity_options, "Choose entity type")
-        entity_type = entity_map[entity_choice]
+        elif main_choice == 3: # Analyze Feature Distribution
+            # Entity selection
+            print("\nSelect entity for feature analysis:")
+            entity_options = [
+                "Vehicle features",
+                "Junction features",
+                "Road features (edges)"
+            ]
+            entity_map = ["vehicle", "junction", "edge"]
+            entity_choice = print_menu(entity_options, "Choose entity type")
+            entity_type = entity_map[entity_choice]
 
-        features = get_available_features(args.snapshots_folder, entity_type)
-        if not features:
-            print("No features found for this entity.")
-            continue
+            features = get_available_features(args.snapshots_folder, entity_type)
+            if not features:
+                print("No features found for this entity.")
+                continue
 
-        print("\nAvailable Features:")
-        feature_idx = print_menu(features, "Select a feature to analyze")
-        feature_name = features[feature_idx]
+            print("\nAvailable Features:")
+            feature_idx = print_menu(features, "Select a feature to analyze")
+            feature_name = features[feature_idx]
 
-        analysis_options = [
-            "Show Histogram",
-            "Show Boxplot",
-            "Print Statistics",
-            "Detect Outliers",
-            "Show Normalization Preview",
-            "Show Skewness Plot",
-            "Back to Main Menu"
-        ]
-        while True:
-            print(f"\nAnalysis Options for '{feature_name}':")
-            analysis_idx = print_menu(analysis_options, "Select analysis output")
-            if analysis_options[analysis_idx] == "Back to Main Menu":
-                break
+            analysis_options = [
+                "Show Histogram",
+                "Show Boxplot",
+                "Print Statistics",
+                "Detect Outliers",
+                "Show Normalization Preview",
+                "Show Skewness Plot",
+                "Back to Main Menu"
+            ]
+            while True:
+                print(f"\nAnalysis Options for '{feature_name}':")
+                analysis_idx = print_menu(analysis_options, "Select analysis output")
+                if analysis_options[analysis_idx] == "Back to Main Menu":
+                    break
 
-            submenu_map = {
-                0: ["histogram"],
-                1: ["boxplot"],
-                2: ["stats"],
-                3: ["outliers"],
-                4: ["normalization_preview"],
-                5: ["skewness"],
-            }
-            analyze_feature_distribution(
-                snapshots_folder=args.snapshots_folder,
-                feature_name=feature_name,
-                entity_type=entity_type,
-                output_options=submenu_map[analysis_idx]
-            )
-
+                submenu_map = {
+                    0: ["histogram"],
+                    1: ["boxplot"],
+                    2: ["stats"],
+                    3: ["outliers"],
+                    4: ["normalization_preview"],
+                    5: ["skewness"],
+                }
+                analyze_feature_distribution(
+                    snapshots_folder=args.snapshots_folder,
+                    feature_name=feature_name,
+                    entity_type=entity_type,
+                    output_options=submenu_map[analysis_idx]
+                )
+        elif main_choice == 4:
+            labels_file = os.path.join(args.snapshots_folder, "labels.json")
+            plot_route_distances_over_time(labels_file)
+        
+        elif main_choice == 5:
+            labels_file = os.path.join(args.snapshots_folder, "labels.json")
+            plot_travel_durations_over_time(labels_file)
+        
         print("\nWould you like to:")
         next_step = print_menu(["Start Over", "Exit"])
         if next_step == 1:
