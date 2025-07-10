@@ -91,7 +91,7 @@ import ast
 import argparse
 from torch_geometric.data import Data
 from tqdm import tqdm
-import datetime
+from collections import defaultdict
 import math
 import re
 
@@ -436,13 +436,13 @@ class DatasetCreator:
                 print(f"ERROR: Edge {eid} has no length defined. Terminating.")
                 exit(1)
             if self.normalize: # use min-max normalization instead of z-score
-                length = (length - stats['length']['min']) / (stats['length']['max'] - stats['length']['min'])
+                length = length / stats['length']['max']
             features.append(length)
             # edge_demand and edge_occupancy will be calculated dynamically per snapshot
             features.append(0)  # Placeholder for edge_demand
             features.append(0)  # Placeholder for edge_occupancy
             assert len(features) == 7, f"Edge features for {eid} should have 7 elements, got {len(features)}"
-            static_edge_features.append(features)       
+            static_edge_features.append(features)
         
         return  static_edge_index, static_edge_type, static_edge_ids_to_index, static_edge_features
 
@@ -509,7 +509,7 @@ class DatasetCreator:
 
         return y, valid_vehicle_ids
 
-    def process_vehicle_features(self, snap_file, current_vehicle_ids):
+    def process_vehicle_features(self, snap_file, current_vehicle_ids, static_edge_ids_to_index, static_edge_features):
         """
         Processes vehicle features from a snapshot file and returns a list of feature vectors.
 
@@ -590,11 +590,17 @@ class DatasetCreator:
         #sort vehicle nodes by their IDs to ensure consistent order
         vehicle_nodes = sorted(vehicle_nodes, key=lambda x: extract_numeric_suffix(x.get('id', '')))
         features = []
+        vehicle_routes_flat = []
+        vehicle_route_splits = []
+        current_edges = []
+        position_on_edges = []
+
         for vid in current_vehicle_ids:
             vehicle_node = next((node for node in vehicle_nodes if node.get('id') == vid), None)
             if vehicle_node is None:
                 print(f"ERROR: Vehicle {vid} not found in snapshot {snap_file}. Terminating.")
                 exit(1)
+            # 1. Feature extraction for each vehicle node
             feature = []  # Initialize feature vector
             # node_type = 1 for vehicle
             if 'node_type' not in vehicle_node:
@@ -691,7 +697,6 @@ class DatasetCreator:
                 print(f"ERROR: Vehicle {vid} has no current_x or current_y defined. Terminating.")
                 exit(1)
             if self.normalize: # use min-max normalization instead of z-score
-                
                 current_x = (current_x - vehicle_stats['current_x']['min']) / (vehicle_stats['current_x']['max'] - vehicle_stats['current_x']['min'])
                 current_y = (current_y - vehicle_stats['current_y']['min']) / (vehicle_stats['current_y']['max'] - vehicle_stats['current_y']['min'])
             feature.append(current_x)
@@ -700,10 +705,47 @@ class DatasetCreator:
             feature.append(0)  # j_type = 0 for vehicle (not relevant)
             # Add the feature vector to the list
             features.append(feature)
+
+            # 2. Extract route and current edge information
+            route_edge_ids = vehicle_node.get('route', [])
+            route_edge_indices = []
+            for eid in route_edge_ids:
+                if eid not in static_edge_ids_to_index:
+                    print(f"ERROR: Edge ID {eid} not found in static_edge_ids_to_index. Terminating.")
+                    exit(1)
+                route_edge_indices.append(static_edge_ids_to_index[eid])
+
+            vehicle_routes_flat.extend(route_edge_indices)
+            vehicle_route_splits.append(len(route_edge_indices))
+
+            # 3. current edge index
+            current_edge_str = vehicle_node.get("current_edge")
+            current_edge_idx = static_edge_ids_to_index.get(current_edge_str, -1)
+            if current_edge_idx == -1:
+                print(f"ERROR: Current Edge ID {current_edge_str} not found in static_edge_ids_to_index. Terminating.")
+                exit(1)
+            current_edges.append(current_edge_idx)
+
+            # 4. position on edge
+            position_on_edge = float(vehicle_node.get("current_position", -1))
+            static_edge_features = self.entities_data['edge']['features'][current_edge_str]
+            edge_length = static_edge_features.get('length', -1.0)
+            if edge_length == -1.0:
+                print(f"ERROR: Edge {static_edge_features} has no length defined. Terminating.")
+                exit(1)
+            if position_on_edge == -1:
+                print(f"ERROR: Vehicle {vid} has no current_position defined. Terminating.")
+                exit(1)
+            if self.normalize: # use min-max normalization instead of z-score
+                # Get the static features for this edge
+                position_on_edge = position_on_edge / edge_length  # Normalize position on edge
+            if position_on_edge < 0 or position_on_edge > 1:
+                print(f"ERROR: Position on edge for vehicle {vid} is out of bounds: {position_on_edge}. Terminating.")
+                exit(1)
+        
+            position_on_edges.append(position_on_edge)
             
-        # Convert features to a tensor
-        x = torch.FloatTensor(features)
-        return x, snapshot_data
+        return snapshot_data, features, vehicle_routes_flat, vehicle_route_splits, current_edges, position_on_edges
 
     def update_edge_features(self, snapshot_data, current_vehicle_ids, static_edge_features):
 
@@ -796,7 +838,90 @@ class DatasetCreator:
             updated_features[6] = edge_occupancy  # Update edge_occupancy in the features
             updated_edge_features.append(updated_features)
         return updated_edge_features
-           
+    from collections import defaultdict
+
+    def construct_dynamic_edges(
+        self,
+        current_vehicle_ids,
+        current_vehicle_current_edges,
+        current_vehicle_position_on_edges,
+        static_edge_ids_to_index,
+        static_junction_ids_to_index,
+        static_edge_features,
+        static_edge_info,  # mapping edge_id → {from, to}
+        edge_feature_dim,
+        junction_offset  # = 0
+    ):
+        """
+        Constructs dynamic edges to represent the relative position of vehicles along their current edge.
+
+        These edges are added on top of the static road graph to model the *current dynamic structure* of traffic flow.
+
+        Returns:
+            dynamic_edge_index: [2, N] list of source–target node indices for dynamic edges.
+            dynamic_edge_type: [N] list of integer type codes for each edge (1 = J→V, 2 = V→J, 3 = V→V).
+            dynamic_edge_attr: [N, F] dummy feature vectors for each dynamic edge.
+        """
+
+        # Initialize empty lists for edge_index, edge_type, and edge_attr
+        dynamic_edge_index = [[], []]
+        dynamic_edge_type = []
+        dynamic_edge_attr = []
+
+        # Create a mapping: edge_id → list of vehicle indices currently on that edge
+        edge_to_vehicle_map = defaultdict(list)
+        for i, edge_idx in enumerate(current_vehicle_current_edges):
+            # Get the string edge_id from index
+            edge_id = list(static_edge_ids_to_index.keys())[edge_idx.item()]
+            edge_to_vehicle_map[edge_id].append(i)  # i = vehicle index (in this batch)
+
+        # Iterate over each road segment (edge) with active vehicles
+        for edge_id, veh_indices in edge_to_vehicle_map.items():
+            # Get basic info for this edge
+            edge_static = static_edge_info[edge_id]  # dict with 'from' and 'to' junctions
+            from_j = edge_static['from']
+            to_j = edge_static['to']
+
+            # Get global node indices for the junctions
+            from_idx = static_junction_ids_to_index[from_j] + junction_offset
+            to_idx = static_junction_ids_to_index[to_j] + junction_offset
+
+            # Sort vehicles on this edge by their position (ascending)
+            veh_indices_sorted = sorted(
+                veh_indices,
+                key=lambda i: current_vehicle_position_on_edges[i].item()
+            )
+
+            # Build dynamic edges along this edge
+            for i, veh_idx in enumerate(veh_indices_sorted):
+                # Compute global index of the vehicle node (offset by num_junctions)
+                veh_global_idx = len(static_junction_ids_to_index) + veh_idx
+
+                if i == 0:
+                    # First vehicle on the edge → connect from start junction
+                    dynamic_edge_index[0].append(from_idx)
+                    dynamic_edge_index[1].append(veh_global_idx)
+                    dynamic_edge_type.append(1)  # Type 1: JUNCTION → VEHICLE
+                else:
+                    # Connect from the previous vehicle on this edge
+                    prev_veh_idx = veh_indices_sorted[i - 1]
+                    prev_veh_global_idx = len(static_junction_ids_to_index) + prev_veh_idx
+                    dynamic_edge_index[0].append(prev_veh_global_idx)
+                    dynamic_edge_index[1].append(veh_global_idx)
+                    dynamic_edge_type.append(3)  # Type 3: VEHICLE → VEHICLE
+
+                if i == len(veh_indices_sorted) - 1:
+                    # Last vehicle on the edge → connect to end junction
+                    dynamic_edge_index[0].append(veh_global_idx)
+                    dynamic_edge_index[1].append(to_idx)
+                    dynamic_edge_type.append(2)  # Type 2: VEHICLE → JUNCTION
+
+                # All dynamic edges get dummy edge features (currently zeros)
+                dynamic_edge_attr.append([0.0] * edge_feature_dim)
+
+        return dynamic_edge_index, dynamic_edge_type, dynamic_edge_attr
+
+ 
     def create_dataset(self):
         print(f"Creating static junction data...")
         static_junction_ids_to_index, static_junction_features = self.process_junctions()
@@ -805,23 +930,69 @@ class DatasetCreator:
         print(f"Converting {len(self.snapshot_files)} snapshots to PyG Data objects...")
         for snap_file in tqdm(self.snapshot_files, desc="Processing snapshots"):
             y_tensor, current_vehicle_ids = self.process_labels(snap_file)
-            vehicles_x, snapshot_data = self.process_vehicle_features(snap_file, current_vehicle_ids)
-            x = [*static_junction_features, *vehicles_x]  # Combine static junction features with vehicle features
-            x_tensor = torch.FloatTensor(x)
+            snapshot_data, vehicle_features, vehicle_routes_flat, vehicle_route_splits, current_vehicle_current_edges, current_vehicle_position_on_edges  = self.process_vehicle_features(snap_file, current_vehicle_ids, static_edge_ids_to_index, static_edge_features)
+            x = [*static_junction_features, *vehicle_features]  # Combine static junction features with vehicle features
+            x_tensor = torch.FloatTensor(x) # nodes features tensor = [static junction features, vehicle features]
+            vehicle_routes_flat_tensor = torch.LongTensor(vehicle_routes_flat)
+            vehicle_route_splits_tensor = torch.LongTensor(vehicle_route_splits)
+            current_vehicle_current_edges_tensor = torch.LongTensor(current_vehicle_current_edges)
+            current_vehicle_position_on_edges_tensor = torch.FloatTensor(current_vehicle_position_on_edges)
+
+
             
-            # print(f"Processing snapshot {snap_file} with {len(current_vehicle_ids)} vehicles...")
+            
+            if len(x_tensor) != len(static_junction_features) + len(current_vehicle_ids):
+                print(f"ERROR: x_tensor length {len(x_tensor)} does not match expected length {len(static_junction_features) + len(current_vehicle_ids)}. Terminating.")
+                exit(1)
+            if len(y_tensor) != len(current_vehicle_ids):
+                print(f"ERROR: y_tensor length {len(y_tensor)} does not match current_vehicle_ids length {len(current_vehicle_ids)}. Terminating.")
+                exit(1)
+            if len(static_edge_index[0]) != len(static_edge_index[1]) or len(static_edge_type) != len(static_edge_index[0]):
+                print(f"ERROR: static_edge_index and static_edge_type lengths do not match. Terminating.")
+                exit(1)
+            if len(static_edge_features) != len(static_edge_ids_to_index):
+                print(f"ERROR: static_edge_features length {len(static_edge_features)} does not match static_edge_ids_to_index length {len(static_edge_ids_to_index)}. Terminating.")
+                exit(1) 
+            
             static_edge_features_updated = self.update_edge_features(snapshot_data, current_vehicle_ids, static_edge_features)
             edge_attr_tensor = torch.FloatTensor(static_edge_features_updated)
             
-            edge_index = torch.tensor(static_edge_index, dtype=torch.long)
-            edge_type = torch.tensor(static_edge_type, dtype=torch.long)
+            dynamic_edge_index, dynamic_edge_type, dynamic_edge_attr = self.construct_dynamic_edges(
+                current_vehicle_ids=current_vehicle_ids,
+                current_vehicle_current_edges=current_vehicle_current_edges_tensor,
+                current_vehicle_position_on_edges=current_vehicle_position_on_edges_tensor,
+                static_edge_ids_to_index=static_edge_ids_to_index,
+                static_junction_ids_to_index=static_junction_ids_to_index,
+                static_edge_features=static_edge_features_updated,
+                static_edge_info=self.entities_data['edge']['features'],
+                edge_feature_dim=edge_attr_tensor.shape[1],
+                junction_offset=0
+            )
+
+            full_edge_index = [
+                static_edge_index[0] + dynamic_edge_index[0],
+                static_edge_index[1] + dynamic_edge_index[1]
+            ]
+            full_edge_type = static_edge_type + dynamic_edge_type
+            full_edge_attr_tensor = torch.cat([edge_attr_tensor, torch.FloatTensor(dynamic_edge_attr)], dim=0)
+
+            edge_index_tensor = torch.tensor(full_edge_index, dtype=torch.long)
+            edge_type_tensor = torch.tensor(full_edge_type, dtype=torch.long)
+
+
             data = Data(
-                        x=x_tensor, 
-                        edge_index=edge_index, edge_type=edge_type, y=y_tensor, 
-                        edge_attr=edge_attr_tensor,
-                        static_junction_ids_to_index=static_junction_ids_to_index,
-                        static_edge_ids_to_index=static_edge_ids_to_index,
-                        current_vehicle_ids=current_vehicle_ids)
+                        x=x_tensor,
+                        edge_index=edge_index_tensor,
+                        edge_type=edge_type_tensor,
+                        y=y_tensor,
+                        edge_attr=full_edge_attr_tensor,
+                        vehicle_ids=current_vehicle_ids,
+                        junction_ids=list(static_junction_ids_to_index.keys()),
+                        edge_ids=list(static_edge_ids_to_index.keys()),
+                        vehicle_routes=vehicle_routes_flat_tensor,
+                        vehicle_route_splits=vehicle_route_splits_tensor,
+                        current_vehicle_current_edges=current_vehicle_current_edges_tensor,
+                        current_vehicle_position_on_edges=current_vehicle_current_edges_tensor)
             # Save the data object to a .pt file
             out_file = os.path.join(self.out_graph_folder, snap_file.replace(".json", ".pt"))
             torch.save(data, out_file)
