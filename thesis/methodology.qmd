@@ -1,0 +1,262 @@
+# Methodology
+
+This chapter details the proposed traffic forecasting model, including its graph formulation, architectural components, and implementation strategy. The methodology is centered around a dynamic spatio-temporal graph representation in which both vehicles and junctions are modeled as nodes. Edges represent either physical road segments or relational connections between entities at a given time. The system incorporates user-declared destinations and real-time GPS positions to enable intent-aware and adaptive traffic forecasting.
+
+## Graph Representation and Construction
+
+Let the traffic network at time $t$ be represented as a directed graph $G_t = (V_t, E_t)$, where:
+
+- $V_t = V_t^j \cup V_t^v$ is the set of nodes, composed of static **junction nodes** $V_t^j$ and dynamic **vehicle nodes** $V_t^v$.
+- $E_t \subseteq V_t \times V_t$ is the set of directed edges representing road segments, vehicle-to-vehicle interactions, and routing intent.
+
+The graph $G_t$ captures the state of the traffic network at a single point in time $t$, including road topology, traffic flow, and user-specific routing behaviors.
+
+**Junction nodes** correspond to fixed physical infrastructure such as intersections, roundabouts, and traffic lights. These nodes remain constant across all time steps and define the topological skeleton of the road network.
+
+**Vehicle nodes**, denoted as $v_i^t \in V_t^v$, represent mobile agents (e.g., cars, buses, or trucks) whose positions and attributes vary over time. Each vehicle node retains a unique identifier $i$ across all time steps, allowing the model to track its temporal evolution through the graph sequence. Formally, $v_i^t$ refers to the same physical entity across all $t$, with time-dependent features $\mathbf{x}_{v_i}^t$. The specific features associated with each node type will be formally described in a subsequent section.
+
+**Edges** are dynamically constructed based on the current spatial relationships between entities. Each edge is denoted as $(u, v)^t \in E_t$, where $u, v \in V_t$, and the edge direction represents the interaction or connection type at time $t$. We define four mathematically distinct categories of edges:
+
+- **Road segment edges**: Directed edges $(u, v)^t \in E_t$ such that $u, v \in V_t^j$, derived from the underlying road topology. The direction $(u \rightarrow v)$ follows legal traffic flow between connected junctions.
+
+- **Traversal edges**: Directed edges $(u, v)^t \in E_t$ such that $u \in V_t^j$ and $v \in V_t^v$ (or vice versa), indicating that a vehicle is currently on the road segment connected to the junction.
+
+- **Interaction edges**: Directed edges $(u, v)^t \in E_t$ such that $u, v \in V_t^v$ and the spatial proximity between the vehicles satisfies a predefined threshold. These edges capture influence due to close proximity, such as slowing in response to another vehicle ahead.
+
+- **Intent edges**: Directed edges $(u, v)^t \in E_t$ such that $u \in V_t^v$ and $v \in V_t^j$, used to model the vehicle’s declared destination or route plan.
+
+These edge types can coexist in the graph and may carry distinct feature vectors $\mathbf{e}_{uv}^t$ depending on the type of connection. The specific edge features will be formally described in a subsequent section.
+
+The model operates over a temporal sequence of graphs $\mathcal{G} = \{ G_{t-k}, \dots, G_t \}$, where each snapshot is constructed at a fixed interval $\Delta t$ and encodes the evolving state of the traffic network. Here, $k$ denotes the number of historical graph snapshots included in the model’s input window, determining how many past time steps the model observes to learn temporal dependencies.
+
+This temporal sequence captures the spatio-temporal dynamics of the traffic system, allowing the model to infer both short-term fluctuations and long-term congestion trends from the historical data.
+
+To summarize, each snapshot $G_t$ encodes the current traffic graph, and the sequence $\mathcal{G}$ enables the model to learn patterns across both space and time. This structure forms the foundation upon which feature extraction and neural forecasting modules are applied, as detailed in subsequent sections.
+
+## Node and Edge Features
+
+Each node $v \in V_t$ and edge $(u,v) \in E_t$ is associated with a feature vector that encodes relevant spatial, temporal, and semantic information. We define:
+
+- **Node feature vector**: $\mathbf{x}_v^t \in \mathbb{R}^d$  
+  where $d$ is the dimensionality of the node's feature representation.
+
+- **Edge feature vector**: $\mathbf{e}_{uv}^t \in \mathbb{R}^e$  
+  where $e$ depends on the type and context of the edge.
+
+### Junction node features used:
+- Incoming/outgoing vehicle count
+- Queue length
+- Average waiting time
+- Current signal phase
+- Historical flow statistics
+
+### Vehicle node features used:
+- Current position (e.g., coordinates or edge ID)
+- Speed and acceleration
+- Time since departure
+- Distance to next junction
+- Estimated time of arrival (ETA)
+- Remaining route or destination embedding
+- Vehicle type (e.g., car, truck, bus)
+- User-declared intent (e.g., urgency level)
+
+### Edge features used:
+- Road segment length and speed limit
+- Travel time or delay estimate
+- Relative distance between vehicles (for interaction edges)
+- Proximity-based influence weights
+- Predicted congestion or flow on the segment
+
+These features are normalized and embedded as input to the neural network modules described in subsequent sections.
+
+
+## Model Architecture
+
+The proposed model is designed to forecast traffic states by learning from dynamic, spatio-temporal graph sequences. Since this research aims to evaluate multiple architectural configurations, the description presented here outlines a flexible modular framework. Several combinations of spatial and temporal encoding mechanisms will be empirically compared to identify the optimal architecture.
+
+Let the input be a sequence of graphs $\mathcal{G} = \{G_{t-k}, \dots, G_t\}$, where each graph $G_t = (V_t, E_t)$ encodes the traffic state at time $t$. Associated with each graph are node features $\mathbf{X}_t \in \mathbb{R}^{|V_t| \times d}$ and edge features $\mathbf{E}_t \in \mathbb{R}^{|E_t| \times e}$. The model's objective is to learn a function $f$ that maps the input sequence to a prediction of the traffic state at the next time step:
+
+$$
+\hat{Y}_{t+1} = f(\mathcal{G}) = f(G_{t-k}, \dots, G_t)
+$$
+
+The architecture is structured in three primary stages: spatial encoding, temporal encoding, and output decoding. First, spatial relationships within each snapshot $G_t$ are encoded using a Graph Neural Network (GNN), such as a Graph Convolutional Network (GCN), Graph Attention Network (GAT), or edge-weighted variant. This produces a node-level spatial embedding $\mathbf{H}_t^{(s)}$ from the input features:
+
+$$
+\mathbf{H}_t^{(s)} = \text{GNN}(G_t, \mathbf{X}_t, \mathbf{E}_t)
+$$
+
+Next, the sequence of spatial embeddings $\{\mathbf{H}_{t-k}^{(s)}, \dots, \mathbf{H}_t^{(s)}\}$ is passed to a temporal encoder that models the evolution of node states over time. This module captures sequential dependencies and temporal trends using one of the following alternatives: Long Short-Term Memory (LSTM), Gated Recurrent Unit (GRU), or a Transformer-based encoder. The output is a temporally aggregated representation $\mathbf{Z}_t$:
+
+$$
+\mathbf{Z}_t = \text{TemporalEncoder}(\mathbf{H}_{t-k}^{(s)}, \dots, \mathbf{H}_t^{(s)})
+$$
+
+Finally, a task-specific prediction head maps the temporally aggregated representation $\mathbf{Z}_t$ to the desired output space. Depending on the forecasting objective, this may involve predicting node-level variables (e.g., estimated time of arrival), edge-level quantities (e.g., traffic flow), or graph-level summaries (e.g., congestion scores):
+
+$$
+\hat{Y}_{t+1} = f_{\text{out}}(\mathbf{Z}_t)
+$$
+
+### Architectural Variants and Destination-Aware Extension
+
+To explore the effects of different architectural designs on prediction accuracy and generalization, we investigate multiple variants of the spatio-temporal model. These variants differ in their choice of spatial and temporal encoders, as well as in how they incorporate agent-level information such as destination intent. The goal is to identify the most effective combination for capturing complex traffic dynamics while leveraging long-term route information.
+
+#### Baseline Variant: GCN + LSTM
+
+The baseline model combines a Graph Convolutional Network (GCN) for spatial encoding with a Long Short-Term Memory (LSTM) network for temporal modeling. At each time step $t$, node and edge features are processed by the GCN to capture local spatial dependencies within $G_t$. The resulting spatial embeddings $\mathbf{H}_t^{(s)}$ are then passed through an LSTM, which models how these embeddings evolve over time across the sequence $\mathcal{G} = \{G_{t-k}, \dots, G_t\}$. The final LSTM output $\mathbf{Z}_t$ is used by the prediction head to estimate traffic-related quantities at time $t+1$. However, this variant does not consider agent-level intent such as destinations or planned routes.
+
+#### GRU Variant: GCN + GRU
+
+This variant replaces the LSTM with a Gated Recurrent Unit (GRU) for temporal modeling, reducing computational complexity while retaining temporal dependency learning. GRUs require fewer parameters and converge faster, which can be advantageous in real-time or resource-constrained settings. The rest of the pipeline remains identical to the baseline.
+
+#### Transformer Variant: GCN + Transformer
+
+In this variant, temporal dependencies are modeled using a Transformer encoder, replacing the recurrent layer entirely. Transformers leverage self-attention to capture both short- and long-range dependencies in parallel. This enables modeling of asynchronous traffic behavior and latent interactions between distant events.
+
+#### GAT Variant: GAT + LSTM
+
+This variant swaps the GCN spatial encoder with a Graph Attention Network (GAT), allowing nodes to assign dynamic weights to their neighbors during spatial aggregation. The GAT enhances representation quality by focusing more on critical connections (e.g., vehicles in congestion or high-traffic junctions).
+
+#### Destination-Aware Variant: GCN + LSTM + Route Embedding
+
+This variant extends the baseline architecture by incorporating explicit information about each vehicle’s planned route. A vehicle’s destination or route is represented as an ordered list of junctions, which is embedded using a separate sequence encoder—such as an LSTM or Transformer—to form a fixed-length route embedding vector $\mathbf{r}_v^t$.
+
+This route embedding is concatenated with the original node feature vector before spatial encoding:
+
+$$
+\tilde{\mathbf{x}}_v^t = [\mathbf{x}_v^t \| \mathbf{r}_v^t]
+$$
+
+The augmented features $\tilde{\mathbf{x}}_v^t$ are then processed by the same GCN and LSTM modules as in the baseline. This enhancement enables the model to reason not only about current traffic states but also about where vehicles intend to go—supporting more informed, future-aware traffic forecasting.
+
+#### Destination-Aware GRU Variant: GCN + GRU + Route Embedding
+
+This variant builds upon the GCN + GRU architecture by integrating destination intent through route embeddings. As in the destination-aware LSTM model, each vehicle’s future path is encoded into a fixed-length vector $\mathbf{r}_v^t$, which is concatenated with its base feature vector. These enriched node features $\tilde{\mathbf{x}}_v^t$ are passed through the spatial encoder (GCN), and the resulting embeddings are fed into a GRU to model temporal dependencies. This combination maintains computational efficiency while incorporating user intent into predictions.
+
+#### Destination-Aware Transformer Variant: GCN + Transformer + Route Embedding
+
+This variant augments the GCN + Transformer pipeline with destination awareness. Each vehicle’s route is processed through an embedding module and concatenated with its standard features prior to GCN encoding. The spatial embeddings are passed through a Transformer encoder that captures temporal evolution across all time steps using self-attention. This design unifies high-fidelity spatial reasoning with parallel temporal modeling, enriched by goal-driven trajectory data.
+
+#### Summary of Architectural Variants
+
+| Variant                                 | Spatial Encoder | Temporal Encoder | Destination-Aware | Notes                                                   |
+|-----------------------------------------|------------------|------------------|-------------------|---------------------------------------------------------|
+| GCN + LSTM (Baseline)                   | GCN              | LSTM             | No                | Strong foundation, interpretable                        |
+| GCN + GRU                               | GCN              | GRU              | No                | Lightweight, faster convergence                         |
+| GCN + Transformer                       | GCN              | Transformer      | No                | Long-range dependency modeling                          |
+| GAT + LSTM                              | GAT              | LSTM             | No                | Learns spatial importance dynamically                   |
+| GCN + LSTM + Route Embedding            | GCN              | LSTM             | Yes               | Core contribution of this research                      |
+| GCN + GRU + Route Embedding             | GCN              | GRU              | Yes               | Lightweight model with destination awareness            |
+| GCN + Transformer + Route Embedding     | GCN              | Transformer      | Yes               | Parallel temporal reasoning enriched by future intent   |
+
+
+## Training and Evaluation Procedure
+
+This section outlines the procedure used to train and evaluate the proposed spatio-temporal graph-based traffic prediction models. All model variants described in the previous section are trained under a unified experimental protocol to ensure fair and reproducible comparisons. Training is conducted using sequences of traffic graph snapshots, where each sequence represents $k+1$ consecutive time steps. The first $k$ graphs serve as input, and the model is trained to predict the traffic state in the $(k+1)$-th graph.
+
+**Graph Sampling and Supervision.** Each graph snapshot $G_t = (V_t, E_t)$ is associated with feature matrices for nodes ($\mathbf{X}_t$) and optionally for edges ($\mathbf{E}_t$). During training, a sliding window of length $k+1$ is used to generate overlapping input-target pairs $(\mathcal{G}_{t-k:t-1}, G_t)$ from the full traffic simulation. The models are trained using supervised learning, where the loss function compares the predicted graph properties at time $t$ to the ground truth values from $G_t$.
+
+**Optimization Strategy.** To ensure stable and efficient optimization, the models are trained using the Adam optimizer with an initial learning rate of $\alpha = 0.001$. A learning rate scheduler with exponential decay or plateau-based adjustment is employed to fine-tune the learning process. Training proceeds in mini-batches, where each batch contains a set of temporally aligned graph sequences, and gradient descent is performed to minimize the loss over the predicted outputs.
+
+**Loss Functions.** The primary loss functions used for training are Mean Squared Error (MSE) and Mean Absolute Error (MAE), depending on the prediction target. For example, ETA prediction for vehicles is treated as a regression problem using:
+
+$$
+\mathcal{L}_{\text{MSE}} = \frac{1}{N} \sum_{i=1}^{N} (\hat{y}_i - y_i)^2,
+$$
+
+where $\hat{y}_i$ and $y_i$ are the predicted and true values, respectively, for the $i$-th node or edge. MAE is also used as a complementary metric to measure robustness to outliers. For classification tasks such as predicting congestion states or discrete route segments, cross-entropy loss may be employed.
+
+**Training Configuration.** All models are trained for a maximum of 100 epochs, with early stopping based on validation loss monitored every 5 epochs. The batch size is set to 32 graph sequences, and training is conducted on a single NVIDIA RTX 3090 GPU. On average, each epoch takes approximately 5 minutes depending on the architecture. Checkpoints are saved based on the best validation performance, and gradient clipping is applied to stabilize training.
+
+**Evaluation Metrics.** To assess model performance across prediction tasks, we employ a variety of evaluation metrics. For continuous regression tasks such as ETA prediction, we use Mean Absolute Error (MAE), Root Mean Squared Error (RMSE), and the coefficient of determination ($R^2$). These metrics provide insight into both the average prediction deviation and the variance explained by the model.
+
+For classification tasks, such as congestion level classification or route selection, we use Accuracy, Precision, Recall, and F1-score. These are computed at the node or edge level depending on the specific output structure.
+
+All metrics are computed on the validation and test sets, and results are averaged across multiple runs to ensure statistical significance.
+
+**Validation Strategy.** To maintain the temporal integrity of the traffic data and avoid data leakage, we employ a time-based data split. The dataset is divided chronologically into training (70%), validation (15%), and test (15%) sets. All models are evaluated on the test set only after hyperparameter tuning is finalized using the validation set.
+
+This strategy ensures that future graph snapshots are never used to predict past states. Additionally, each model variant is trained and evaluated across multiple random seeds to account for initialization variance, and performance metrics are reported as mean ± standard deviation.
+
+## Dataset Construction
+
+The dataset used to train and evaluate the proposed models is derived from a time-series of traffic simulation snapshots generated by the SUMO (Simulation of Urban Mobility) engine [@SUMO2018]. These simulations are designed to mimic realistic traffic conditions on a grid-based urban road network, with various vehicle types, route plans, and signalized junctions. Each snapshot captures the full state of the traffic network at a specific time step and serves as a frame in the temporal sequence of dynamic graphs.
+
+**Temporal Resolution.** Snapshots are extracted at a fixed interval of  seconds. This frequency is chosen to balance temporal granularity with computational efficiency and to reflect meaningful changes in traffic conditions without redundancy. The resulting dataset is a time-ordered series , where each  encodes the traffic state at time . These sequences are used to construct training examples by aggregating  historical snapshots as input and using the following snapshot as the prediction target.
+
+**Supervision Targets.** The specific targets used for training depend on the prediction task. For estimated time of arrival (ETA), each vehicle's actual arrival time at its destination is recorded and subtracted from its current simulation time to produce a ground-truth ETA value. For congestion forecasting, the target is computed based on metrics such as queue length, average delay, or throughput at junctions. Edge-level targets, such as predicted flow or travel time along road segments, are extracted by tracking vehicle transitions across edges between consecutive snapshots.
+
+**Sequence Generation and Batching.** To prepare training sequences, the dataset is segmented using a sliding window of fixed length . For each window, the first  graph snapshots serve as the model input, and the final snapshot provides the supervision target. This approach enables the model to learn from evolving traffic patterns and make predictions based on recent temporal context. The sequences are shuffled and grouped into mini-batches to facilitate efficient training with temporal graph batching utilities provided by PyTorch Geometric Temporal and DGL libraries.
+
+**Future Dataset Extension.** While the initial dataset is generated synthetically using SUMO, the model is designed to be adaptable to real-world data. In future work, we plan to validate the model on datasets derived from GPS traces and traffic sensors collected from real urban environments. This transition will require additional preprocessing steps to infer vehicle trajectories, construct time-aligned graph snapshots, and extract supervisory signals from raw data. Ensuring consistency between simulation-based and real-world data representations will be critical for seamless model transfer. In addition to this, we aim to explore the possibility of converting existing benchmark datasets into our dynamic vehicle-junction graph format. A primary challenge lies in the fact that most public traffic datasets are based on static sensor measurements (e.g., loop detectors), which do not track individual vehicle identities or their destinations. To overcome this limitation, we propose replaying these datasets within the SUMO simulator to reconstruct vehicle trajectories. This replay-based simulation would allow us to infer agent-level paths and estimate destinations retrospectively. Post-processing techniques would then be applied to transform the resulting vehicle movement into temporally aligned graph snapshots that are compatible with our spatio-temporal model framework.
+
+# Exploratory Data Analysis (EDA)
+
+To ensure the reliability and effectiveness of the proposed traffic forecasting model, we performed an extensive Exploratory Data Analysis (EDA) on the simulation-generated dataset. EDA is essential for detecting data quality issues, understanding the statistical properties of features, and informing subsequent preprocessing steps. Below, we outline the key EDA tasks performed and their specific benefits for both modeling and scientific reporting.
+
+**Key EDA Tasks and Rationale**
+
+- **Feature Distribution Analysis**  
+  Distributions (histograms, boxplots) were plotted for primary features such as speed, route length, travel time, and vehicle/junction counts. This helps detect outliers, feature skewness, and supports the choice of normalization/standardization techniques.
+  
+- **Missing Value Assessment**  
+  All node and edge attributes were checked for missing or null values. Identifying and quantifying missing data is crucial to avoid silent model failures or biased learning due to imputation.
+
+- **Correlation and Redundancy Analysis**  
+  Correlation matrices were computed between numerical features (e.g., speed, acceleration, route length). High correlations may indicate redundancy, suggesting opportunities for dimensionality reduction or feature selection.
+
+- **Zone and Edge Utilization Analysis**  
+  Distributions of categorical features (such as `current_zone`, `current_edge`, `origin_zone`, and `destination_zone`) were analyzed to uncover spatial imbalances. This informs potential stratification or resampling strategies.
+
+- **Temporal and Spatial Pattern Visualization**  
+  Travel times and route lengths were aggregated and visualized by hour of day and by day of week to reveal temporal patterns such as rush hours or weekend effects. Spatial heatmaps of origin/destination hotspots further reveal network usage biases.
+
+- **Outlier and Anomaly Detection**  
+  Automated and manual inspection identified vehicles or edges with unrealistic speeds, durations, or transitions, enabling the flagging or removal of corrupted or implausible samples.
+
+- **Data Volume and Class Balance Checks**  
+  Counts of vehicles per snapshot, trip durations, and event frequencies were summarized to ensure adequate data coverage and to prevent overfitting to rare or overrepresented behaviors.
+
+- **Longitudinal Consistency Checks**  
+  For select vehicles, the temporal evolution of states (e.g., speed, remaining route length) was plotted to validate the realism and smoothness of simulated dynamics.
+
+Conducting EDA prior to model training ensures a deep understanding of the dataset, facilitates transparent reporting, and reduces the risk of model performance being undermined by data artifacts.
+
+---
+
+# Data Post-Processing
+
+Following EDA, a series of post-processing steps were undertaken to prepare the dataset for ingestion by spatio-temporal graph neural networks. Each step is motivated by best practices in machine learning and traffic forecasting, and directly supports robust and reproducible model training.
+
+**Key Data Post-Processing Steps and Rationale**
+
+- **Normalization and Standardization**  
+  Continuous features such as position coordinates, speed, and route lengths were normalized or standardized (e.g., min-max scaling or z-scoring) to accelerate model convergence and prevent features with large ranges from dominating learning.
+
+- **Categorical Encoding**  
+  Categorical attributes (vehicle type, zone, edge IDs) were transformed into machine-readable representations via one-hot encoding or learned embeddings, enabling the model to exploit their semantic relationships.
+
+- **Outlier Removal and Correction**  
+  Samples exhibiting impossible or implausible values, as identified during EDA, were either corrected if possible or removed to ensure label and feature integrity.
+
+- **Time Alignment and Snapshot Aggregation**  
+  Vehicle and junction states were temporally aligned into regular snapshot intervals, with interpolation or padding as necessary, ensuring consistent graph sequences for temporal modeling.
+
+- **Feature Selection and Reduction**  
+  Features with low variance or high redundancy were dropped, and derived features (e.g., percentage of route remaining, average trip speed) were computed to enhance model informativeness and reduce noise.
+
+- **Data Splitting and Stratification**  
+  The dataset was partitioned into training, validation, and test sets using a time-based split, thereby preventing temporal leakage. Where appropriate, stratification ensured balanced representation of traffic patterns and route types.
+
+- **Target Engineering**  
+  Ground truth travel times and ETAs were computed from the raw simulation logs and formatted to match the output structure of the neural models. Additional labels (e.g., congestion state, remaining travel time at intermediate snapshots) were constructed as needed for supervised learning.
+
+- **Graph Construction and Export**  
+  Each temporally aligned snapshot was converted into a graph structure compatible with PyTorch Geometric, with nodes and edges annotated by preprocessed feature vectors. The resulting data objects were serialized as `.pt` files for efficient batching and model ingestion.
+
+By systematically applying these post-processing steps, we ensured that the final dataset is both scientifically robust and fully compatible with the requirements of dynamic spatio-temporal graph learning models.
+
+## Methodology Summary
+
+This chapter presented the methodological foundation of our research, detailing the architecture, training pipeline, and dataset generation strategy. We introduced a modular spatio-temporal graph learning framework capable of incorporating both dynamic vehicle behaviors and user intent through destination-aware modeling. Several architectural variants were defined to explore the trade-offs between computational efficiency and predictive accuracy. The training procedure was designed to ensure fair and reproducible comparisons across variants, with clearly defined loss functions, optimization strategies, and evaluation metrics. Dataset construction leveraged high-fidelity simulations from SUMO and was structured to support the transition to real-world data sources. Together, these methodological components define a flexible and scalable system for predictive traffic modeling.

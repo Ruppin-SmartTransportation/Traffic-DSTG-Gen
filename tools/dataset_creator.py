@@ -276,7 +276,7 @@ class DatasetCreator:
         entity junction has 362 ids
         ['AA0', 'AA1', 'AA10', 'AA2', 'AA3']
         [junction]['stats'][id] {'keys': []}
-        [junction]['stats'][node_type] {'keys': [0]}
+        [junction]['stats'][node_type] {'mean': 1.0, 'std': 0.0, 'min': 1.0, 'max': 1.0}
         [junction]['stats'][x] {'mean': 8944.463176795582, 'std': 5522.114834273921, 'min': 0.0, 'max': 18000.0}
         [junction]['stats'][y] {'mean': 405.8405524861883, 'std': 3351.537530194094, 'min': -6264.96, 'max': 5000.0}
         [junction]['stats'][type] {'keys': ['priority', 'traffic_light']}
@@ -299,7 +299,7 @@ class DatasetCreator:
         | 17    | `current_y`         | z normalized                                            |
         | 18    | `j_type`            | junction type, "priority", "traffic_light"              |
 
-
+        Total of 19 features per node.
 
         '''
         stats = self.entities_data['junction']['stats']
@@ -312,17 +312,33 @@ class DatasetCreator:
         static_features = self.entities_data['junction']['features']
         junction_features = []
         for jid in junction_ids:    
-            features = [0] * 12  # Initialize with zeros
-            # junction node feature are node_type (0), zone (one hot) x, y, j_type
+            features = [0] * 19  # Initialize with zeros for all 19 features
+            # junction node feature are node_type (0), veh_type_oh (zeros), speed (0), acceleration (0), 
+            # sin_hour, cos_hour, sin_day, cos_day, route_length (0), route_length_left (0), 
+            # zone (one hot), current_x, current_y, j_type
+            
             features[0] = 0  # node_type = 0 for junction
+            
+            # veh_type_oh = [0, 0, 0] for junctions (already initialized as zeros)
+            # speed = 0 for junctions (already initialized as zero)
+            # acceleration = 0 for junctions (already initialized as zero)
+            
+            # sin_hour, cos_hour, sin_day, cos_day - will be set to 0 for junctions
+            # (these are time-dependent features that don't apply to static junctions)
+            # route_length = 0 for junctions (already initialized as zero)
+            # route_length_left = 0 for junctions (already initialized as zero)
+            
+            # zone_oh (one-hot encoding)
             zone_oh = [0] * len(stats['zone']['keys'])  # One-hot encoding for zone
             zone = static_features[jid].get('zone', '_')  # Default to '_' if not found
             if zone not in stats['zone']['keys']:
                 print(f"ERROR: Junction {jid} has unknown zone '{zone}'. Terminating.")
                 exit(1)
             zone_index = stats['zone']['keys'].index(zone)
-            zone_oh[zone_index] = 1  # Set the correct zone index to
-            features.extend(zone_oh)  # Add one-hot zone features
+            zone_oh[zone_index] = 1  # Set the correct zone index to 1
+            features[12:16] = zone_oh  # Add one-hot zone features at indices 12-15
+            
+            # current_x, current_y (junction coordinates)
             x = static_features[jid].get('x', 0.0)
             y = static_features[jid].get('y', 0.0)
             if x is None or y is None:
@@ -332,13 +348,16 @@ class DatasetCreator:
                 x = (x - stats['x']['min']) / (stats['x']['max'] - stats['x']['min'])
                 y = (y - stats['y']['min']) / (stats['y']['max'] - stats['y']['min'])
            
-            features.append(x)
-            features.append(y)
+            features[16] = x  # current_x
+            features[17] = y  # current_y
+            
+            # j_type (junction type)
             j_type = static_features[jid].get('type', 'unknown')
             if j_type not in stats['type']['keys']:
                 print(f"ERROR: Junction {jid} has unknown type '{j_type}'. Terminating.")
                 exit(1)
-            features.append(stats['type']['keys'].index(j_type))  # Convert type to index
+            features[18] = stats['type']['keys'].index(j_type)  # Convert type to index
+            
             junction_features.append(features)
         print(f"Processed {len(junction_features)} junction features and create {len(junction_ids_to_index.keys())} indices.")
 
@@ -486,14 +505,8 @@ class DatasetCreator:
                 exit(1)
 
             if self.normalize :
-                z = (eta - mean_eta) / std_eta
-
-                if self.filter_outliers and abs(z) > 4:
-                    filter_outliers_count += 1
-                    print(f"Filtering out vehicle {vid} with outlier ETA z-score: {z:.2f} etsa: {eta:.2f}")
-                    continue  # Outlier → skip
-
-                eta_final = z # Use z-score normalized value
+                # Use min-max normalization like other features
+                eta_final = (eta - eta_stats['min']) / (eta_stats['max'] - eta_stats['min'])
             else:
                 eta_final = eta
 
@@ -733,6 +746,9 @@ class DatasetCreator:
             if edge_length == -1.0:
                 print(f"ERROR: Edge {static_edge_features} has no length defined. Terminating.")
                 exit(1)
+            if edge_length <= 0:
+                print(f"ERROR: Edge {static_edge_features} has non-positive length {edge_length}. Terminating.")
+                exit(1)
             if position_on_edge == -1:
                 print(f"ERROR: Vehicle {vid} has no current_position defined. Terminating.")
                 exit(1)
@@ -773,11 +789,14 @@ class DatasetCreator:
             if vehicle_node is None:
                 print(f"ERROR: Vehicle {vid} not found in snapshot data. Terminating.")
                 exit(1)
-            route = vehicle_node.get('route', [])
-            if not route:
+            # FIXED: Use route_left instead of route for future demand calculation
+            # route_left represents the remaining route from current position to destination
+            # route represents the complete route from origin to destination
+            route_left = vehicle_node.get('route_left', [])
+            if not route_left:
                 continue
-            # add 1 for each edge in the route of the vehicle
-            for edge_id in route:
+            # add 1 for each edge in the remaining route of the vehicle (this represents future demand)
+            for edge_id in route_left:
                 if edge_id not in edge_demand_map:
                     print(f"ERROR: Edge {edge_id} not found in edge demand map. Terminating.")
                     exit(1)
@@ -813,7 +832,7 @@ class DatasetCreator:
                 
             updated_features[0] = current_avg_speed  # Update avg_speed in the features
 
-            # Calculate edge_demand based on the edge_demand_map
+            # Calculate edge_demand based on the edge_demand_map (future demand from remaining routes)
             edge_demand = edge_demand_map.get(edge_id, -1)
             if edge_demand <= -1:
                 print(f"ERROR: Edge {edge_id} not found in edge demand map. Terminating.")
@@ -826,7 +845,7 @@ class DatasetCreator:
                 edge_demand = edge_demand
             updated_features[5] = edge_demand  # Update edge_demand in the features
             
-            # Calculate edge_occupancy based on number of vehicles on the edge
+            # Calculate edge_occupancy based on number of vehicles currently on the edge
             vehicles_on_road = edge.get('vehicles_on_road', [])
             number_of_vehicles_on_road = len(vehicles_on_road)
             if self.log_normalize:
@@ -909,15 +928,24 @@ class DatasetCreator:
                     dynamic_edge_index[0].append(prev_veh_global_idx)
                     dynamic_edge_index[1].append(veh_global_idx)
                     dynamic_edge_type.append(3)  # Type 3: VEHICLE → VEHICLE
+                # All dynamic edges get dummy edge features (currently zeros)
+                dynamic_edge_attr.append([0.0] * edge_feature_dim)
 
                 if i == len(veh_indices_sorted) - 1:
                     # Last vehicle on the edge → connect to end junction
                     dynamic_edge_index[0].append(veh_global_idx)
                     dynamic_edge_index[1].append(to_idx)
                     dynamic_edge_type.append(2)  # Type 2: VEHICLE → JUNCTION
+                    # All dynamic edges get dummy edge features (currently zeros)
+                    dynamic_edge_attr.append([0.0] * edge_feature_dim)
 
-                # All dynamic edges get dummy edge features (currently zeros)
-                dynamic_edge_attr.append([0.0] * edge_feature_dim)
+               
+        if len(dynamic_edge_index[0]) != len(dynamic_edge_index[1]) or len(dynamic_edge_type) != len(dynamic_edge_index[0]):
+            print(f"ERROR: Dynamic edge index and type lengths do not match. Terminating.")
+            exit(1)
+        if len(dynamic_edge_attr) != len(dynamic_edge_index[0]):
+            print(f"ERROR: Dynamic edge attributes length {len(dynamic_edge_attr)} does not match edge index length {len(dynamic_edge_index[0])}. Terminating.")
+            exit(1)
 
         return dynamic_edge_index, dynamic_edge_type, dynamic_edge_attr
 
@@ -925,12 +953,44 @@ class DatasetCreator:
     def create_dataset(self):
         print(f"Creating static junction data...")
         static_junction_ids_to_index, static_junction_features = self.process_junctions()
+        
+        # Validate junction features
+        expected_junction_features = 19
+        for i, features in enumerate(static_junction_features):
+            if len(features) != expected_junction_features:
+                print(f"ERROR: Junction {i} has {len(features)} features, expected {expected_junction_features}. Terminating.")
+                exit(1)
+        print(f"✓ Junction features validated: {len(static_junction_features)} junctions with {expected_junction_features} features each")
+        
         print("creating static edge data...")
         static_edge_index, static_edge_type, static_edge_ids_to_index, static_edge_features = self.process_static_edges(static_junction_ids_to_index)   
+        
+        # Validate edge features
+        expected_edge_features = 7
+        for i, features in enumerate(static_edge_features):
+            if len(features) != expected_edge_features:
+                print(f"ERROR: Edge {i} has {len(features)} features, expected {expected_edge_features}. Terminating.")
+                exit(1)
+        print(f"✓ Edge features validated: {len(static_edge_features)} edges with {expected_edge_features} features each")
+        
         print(f"Converting {len(self.snapshot_files)} snapshots to PyG Data objects...")
         for snap_file in tqdm(self.snapshot_files, desc="Processing snapshots"):
             y_tensor, current_vehicle_ids = self.process_labels(snap_file)
+            
+            # Skip if no vehicles in this snapshot
+            if len(current_vehicle_ids) == 0:
+                print(f"WARNING: Snapshot {snap_file} has no vehicles. Skipping.")
+                continue
+                
             snapshot_data, vehicle_features, vehicle_routes_flat, vehicle_route_splits, current_vehicle_current_edges, current_vehicle_position_on_edges  = self.process_vehicle_features(snap_file, current_vehicle_ids, static_edge_ids_to_index, static_edge_features)
+            
+            # Validate vehicle features
+            expected_vehicle_features = 19
+            for i, features in enumerate(vehicle_features):
+                if len(features) != expected_vehicle_features:
+                    print(f"ERROR: Vehicle {i} has {len(features)} features, expected {expected_vehicle_features}. Terminating.")
+                    exit(1)
+            
             x = [*static_junction_features, *vehicle_features]  # Combine static junction features with vehicle features
             x_tensor = torch.FloatTensor(x) # nodes features tensor = [static junction features, vehicle features]
             vehicle_routes_flat_tensor = torch.LongTensor(vehicle_routes_flat)
@@ -957,6 +1017,12 @@ class DatasetCreator:
             static_edge_features_updated = self.update_edge_features(snapshot_data, current_vehicle_ids, static_edge_features)
             edge_attr_tensor = torch.FloatTensor(static_edge_features_updated)
             
+            # Validate updated edge features
+            for i, features in enumerate(static_edge_features_updated):
+                if len(features) != expected_edge_features:
+                    print(f"ERROR: Updated edge {i} has {len(features)} features, expected {expected_edge_features}. Terminating.")
+                    exit(1)
+            
             dynamic_edge_index, dynamic_edge_type, dynamic_edge_attr = self.construct_dynamic_edges(
                 current_vehicle_ids=current_vehicle_ids,
                 current_vehicle_current_edges=current_vehicle_current_edges_tensor,
@@ -979,6 +1045,29 @@ class DatasetCreator:
             edge_index_tensor = torch.tensor(full_edge_index, dtype=torch.long)
             edge_type_tensor = torch.tensor(full_edge_type, dtype=torch.long)
 
+            if edge_index_tensor.shape[1] != len(full_edge_type):
+                print(f"ERROR: Edge index tensor shape {edge_index_tensor.shape} does not match edge type length {len(full_edge_type)}. Terminating.")
+                exit(1)
+            if edge_index_tensor.shape[0] != 2:
+                print(f"ERROR: Edge index tensor should have 2 rows, found {edge_index_tensor.shape[0]}. Terminating.")
+                exit(1)
+            if edge_type_tensor.shape[0] != len(full_edge_type):
+                print(f"ERROR: Edge type tensor length {edge_type_tensor.shape[0]} does not match full_edge_type length {len(full_edge_type)}. Terminating.")
+                exit(1)
+            if edge_attr_tensor.shape[0] != len(static_edge_ids_to_index):
+                print(f"ERROR: Edge attribute tensor length {edge_attr_tensor.shape[0]} does not match static_edge_ids_to_index length {len(static_edge_ids_to_index)}. Terminating.")
+                exit(1)
+            if edge_attr_tensor.shape[1] != full_edge_attr_tensor.shape[1]:
+                print(f"ERROR: Edge attribute tensor feature dimension {edge_attr_tensor.shape[1]} does not match full_edge_attr_tensor feature dimension {full_edge_attr_tensor.shape[1]}. Terminating.")
+                exit(1)
+            if full_edge_index[0] is None or full_edge_index[1] is None:
+                print(f"ERROR: Full edge index has None values. Terminating.")
+                exit(1)
+            if len(full_edge_index[0]) != len(full_edge_index[1]) or len(full_edge_type) != len(full_edge_index[0]):
+                print(f"ERROR: Full edge index and type lengths do not match. Terminating.")
+                exit(1)
+            
+
 
             data = Data(
                         x=x_tensor,
@@ -992,10 +1081,20 @@ class DatasetCreator:
                         vehicle_routes=vehicle_routes_flat_tensor,
                         vehicle_route_splits=vehicle_route_splits_tensor,
                         current_vehicle_current_edges=current_vehicle_current_edges_tensor,
-                        current_vehicle_position_on_edges=current_vehicle_current_edges_tensor)
+                        current_vehicle_position_on_edges=current_vehicle_position_on_edges_tensor)
+            
+            # Final validation of the PyG Data object
+            if data.x.shape[1] != expected_junction_features:
+                print(f"ERROR: Final node features have {data.x.shape[1]} dimensions, expected {expected_junction_features}. Terminating.")
+                exit(1)
+            if data.edge_attr.shape[1] != expected_edge_features:
+                print(f"ERROR: Final edge features have {data.edge_attr.shape[1]} dimensions, expected {expected_edge_features}. Terminating.")
+                exit(1)
+            
             # Save the data object to a .pt file
             out_file = os.path.join(self.out_graph_folder, snap_file.replace(".json", ".pt"))
             torch.save(data, out_file)
+            # print(f"✓ Saved {snap_file.replace('.json', '.pt')} with {data.x.shape[0]} nodes, {data.edge_index.shape[1]} edges")
 
 
             
@@ -1057,7 +1156,7 @@ def main():
 
     parser.add_argument(
         "--mapping_folder",
-        action="store_true",
+        type=str,
         default="eda_exports/mappings",
         help="Folder with mappings for vehicle, junction, and edge features (default: eda_exports/mappings)"
     )

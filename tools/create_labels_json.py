@@ -39,12 +39,14 @@ def create_snapshot_labels(
                 # Find the trip for this snapshot
                 matching_gt = None
                 for trip in gt_trips:
-                    if trip["origin_time_sec"] <= snap_time + 1 <= trip["destination_time_sec"]:
+                    # FIXED: Remove arbitrary +1 offset from time range check
+                    if trip["origin_time_sec"] <= snap_time <= trip["destination_time_sec"]:
                         matching_gt = trip
                         break
                 if not matching_gt:
                     continue  # Skip if not found in GT for this time
-                eta = max(matching_gt["destination_time_sec"] - snap_time + 1, 0)
+                # FIXED: Remove arbitrary +1 offset from ETA calculation
+                eta = max(matching_gt["destination_time_sec"] - snap_time, 0)
                 labels.append({
                     "vehicle_id": vid,
                     "origin_time_sec": matching_gt["origin_time_sec"],
