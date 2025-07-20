@@ -114,7 +114,8 @@ class DatasetCreator:
             filter_outliers,
             z_normalize,
             log_normalize,
-            mapping_folder
+            mapping_folder,
+            skip_validation=False
         ):
         # Load configuration
         
@@ -147,6 +148,7 @@ class DatasetCreator:
         self.filter_outliers = filter_outliers
         self.normalize = z_normalize
         self.log_normalize = log_normalize
+        self.skip_validation = skip_validation
         self.entities_data = {}
         self.populate_entities_data()
         self.is_init = True
@@ -949,8 +951,287 @@ class DatasetCreator:
 
         return dynamic_edge_index, dynamic_edge_type, dynamic_edge_attr
 
- 
+    def validate_snapshots_and_labels(self):
+        """
+        Validates that snapshot and label data correspond correctly.
+        
+        This function goes through each pair of snapshot and label files and validates:
+        1. File existence and basic structure
+        2. Vehicle ID consistency between snapshots and labels
+        3. Step number correspondence
+        4. Data integrity and completeness
+        
+        Returns:
+            bool: True if all validations pass, False otherwise
+        """
+        print("🔍 Starting snapshot and label validation...")
+        
+        validation_results = {
+            'total_pairs': 0,
+            'valid_pairs': 0,
+            'invalid_pairs': 0,
+            'missing_files': [],
+            'vehicle_id_mismatches': [],
+            'step_number_mismatches': [],
+            'data_integrity_issues': [],
+            'empty_snapshots': [],
+            'empty_labels': []
+        }
+        
+        for snap_file in tqdm(self.snapshot_files, desc="Validating snapshot-label pairs"):
+            validation_results['total_pairs'] += 1
+            
+            # Extract step number from snapshot filename
+            step_number = extract_step_number(snap_file)
+            if step_number == -1:
+                validation_results['data_integrity_issues'].append({
+                    'file': snap_file,
+                    'issue': 'Invalid step number in filename'
+                })
+                validation_results['invalid_pairs'] += 1
+                continue
+            
+            # Construct corresponding label filename
+            label_file = snap_file.replace("step_", "labels_")
+            label_path = os.path.join(self.labels_folder, label_file)
+            snap_path = os.path.join(self.snapshots_folder, snap_file)
+            
+            # Check file existence
+            if not os.path.exists(snap_path):
+                validation_results['missing_files'].append({
+                    'type': 'snapshot',
+                    'file': snap_path,
+                    'expected_label': label_path
+                })
+                validation_results['invalid_pairs'] += 1
+                continue
+                
+            if not os.path.exists(label_path):
+                validation_results['missing_files'].append({
+                    'type': 'label',
+                    'file': label_path,
+                    'expected_snapshot': snap_path
+                })
+                validation_results['invalid_pairs'] += 1
+                continue
+            
+            # Load and validate snapshot data
+            try:
+                with open(snap_path, 'r') as f:
+                    snapshot_data = json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                validation_results['data_integrity_issues'].append({
+                    'file': snap_path,
+                    'issue': f'Failed to load snapshot JSON: {str(e)}'
+                })
+                validation_results['invalid_pairs'] += 1
+                continue
+            
+            # Load and validate label data
+            try:
+                with open(label_path, 'r') as f:
+                    label_data = json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                validation_results['data_integrity_issues'].append({
+                    'file': label_path,
+                    'issue': f'Failed to load label JSON: {str(e)}'
+                })
+                validation_results['invalid_pairs'] += 1
+                continue
+            
+            # Validate snapshot structure
+            if not isinstance(snapshot_data, dict):
+                validation_results['data_integrity_issues'].append({
+                    'file': snap_path,
+                    'issue': 'Snapshot data is not a dictionary'
+                })
+                validation_results['invalid_pairs'] += 1
+                continue
+            
+            # Check snapshot step number
+            snapshot_step = snapshot_data.get('step')
+            if snapshot_step != step_number:
+                validation_results['step_number_mismatches'].append({
+                    'snapshot_file': snap_file,
+                    'filename_step': step_number,
+                    'data_step': snapshot_step
+                })
+                validation_results['invalid_pairs'] += 1
+                continue
+            
+            # Extract vehicle nodes from snapshot
+            nodes = snapshot_data.get('nodes', [])
+            if not nodes:
+                validation_results['empty_snapshots'].append({
+                    'file': snap_file,
+                    'step': step_number
+                })
+                validation_results['invalid_pairs'] += 1
+                continue
+            
+            vehicle_nodes = [node for node in nodes if node.get('node_type') == 1]
+            snapshot_vehicle_ids = {node.get('id') for node in vehicle_nodes}
+            
+            # Validate label structure
+            if not isinstance(label_data, list):
+                validation_results['data_integrity_issues'].append({
+                    'file': label_path,
+                    'issue': 'Label data is not a list'
+                })
+                validation_results['invalid_pairs'] += 1
+                continue
+            
+            if not label_data:
+                validation_results['empty_labels'].append({
+                    'file': label_file,
+                    'step': step_number
+                })
+                validation_results['invalid_pairs'] += 1
+                continue
+            
+            # Extract vehicle IDs from labels
+            label_vehicle_ids = set()
+            for label_entry in label_data:
+                if not isinstance(label_entry, dict):
+                    validation_results['data_integrity_issues'].append({
+                        'file': label_path,
+                        'issue': f'Label entry is not a dictionary: {label_entry}'
+                    })
+                    validation_results['invalid_pairs'] += 1
+                    break
+                
+                vehicle_id = label_entry.get('vehicle_id')
+                eta = label_entry.get('eta')
+                
+                if vehicle_id is None:
+                    validation_results['data_integrity_issues'].append({
+                        'file': label_path,
+                        'issue': f'Label entry missing vehicle_id: {label_entry}'
+                    })
+                    validation_results['invalid_pairs'] += 1
+                    break
+                
+                if eta is None:
+                    validation_results['data_integrity_issues'].append({
+                        'file': label_path,
+                        'issue': f'Label entry missing eta: {label_entry}'
+                    })
+                    validation_results['invalid_pairs'] += 1
+                    break
+                
+                if not isinstance(eta, (int, float)):
+                    validation_results['data_integrity_issues'].append({
+                        'file': label_path,
+                        'issue': f'Label entry eta is not numeric: {eta}'
+                    })
+                    validation_results['invalid_pairs'] += 1
+                    break
+                
+                label_vehicle_ids.add(vehicle_id)
+            else:  # Only execute if no break occurred
+                # Check vehicle ID correspondence
+                if snapshot_vehicle_ids != label_vehicle_ids:
+                    missing_in_labels = snapshot_vehicle_ids - label_vehicle_ids
+                    missing_in_snapshot = label_vehicle_ids - snapshot_vehicle_ids
+                    
+                    validation_results['vehicle_id_mismatches'].append({
+                        'step': step_number,
+                        'snapshot_file': snap_file,
+                        'label_file': label_file,
+                        'snapshot_vehicles': len(snapshot_vehicle_ids),
+                        'label_vehicles': len(label_vehicle_ids),
+                        'missing_in_labels': list(missing_in_labels),
+                        'missing_in_snapshot': list(missing_in_snapshot)
+                    })
+                    validation_results['invalid_pairs'] += 1
+                    continue
+                
+                # Additional validation: check vehicle node data integrity
+                for vehicle_node in vehicle_nodes:
+                    vehicle_id = vehicle_node.get('id')
+                    required_fields = ['node_type', 'vehicle_type', 'speed', 'acceleration', 
+                                     'current_edge', 'current_position', 'current_zone']
+                    
+                    for field in required_fields:
+                        if field not in vehicle_node:
+                            validation_results['data_integrity_issues'].append({
+                                'file': snap_path,
+                                'issue': f'Vehicle {vehicle_id} missing required field: {field}'
+                            })
+                            validation_results['invalid_pairs'] += 1
+                            break
+                    else:
+                        continue
+                    break
+                else:  # Only execute if no break occurred in the inner loop
+                    # All validations passed
+                    validation_results['valid_pairs'] += 1
+        
+        # Print validation summary
+        print(f"\n📊 Validation Summary:")
+        print(f"   Total pairs checked: {validation_results['total_pairs']}")
+        print(f"   Valid pairs: {validation_results['valid_pairs']}")
+        print(f"   Invalid pairs: {validation_results['invalid_pairs']}")
+        print(f"   Success rate: {validation_results['valid_pairs']/validation_results['total_pairs']*100:.1f}%")
+        
+        if validation_results['missing_files']:
+            print(f"\n❌ Missing files ({len(validation_results['missing_files'])}):")
+            for missing in validation_results['missing_files'][:5]:  # Show first 5
+                print(f"   - {missing['type']}: {missing['file']}")
+            if len(validation_results['missing_files']) > 5:
+                print(f"   ... and {len(validation_results['missing_files']) - 5} more")
+        
+        if validation_results['vehicle_id_mismatches']:
+            print(f"\n⚠️  Vehicle ID mismatches ({len(validation_results['vehicle_id_mismatches'])}):")
+            for mismatch in validation_results['vehicle_id_mismatches'][:3]:  # Show first 3
+                print(f"   - Step {mismatch['step']}: {mismatch['snapshot_vehicles']} vs {mismatch['label_vehicles']} vehicles")
+            if len(validation_results['vehicle_id_mismatches']) > 3:
+                print(f"   ... and {len(validation_results['vehicle_id_mismatches']) - 3} more")
+        
+        if validation_results['step_number_mismatches']:
+            print(f"\n⚠️  Step number mismatches ({len(validation_results['step_number_mismatches'])}):")
+            for mismatch in validation_results['step_number_mismatches'][:3]:  # Show first 3
+                print(f"   - {mismatch['snapshot_file']}: filename={mismatch['filename_step']}, data={mismatch['data_step']}")
+            if len(validation_results['step_number_mismatches']) > 3:
+                print(f"   ... and {len(validation_results['step_number_mismatches']) - 3} more")
+        
+        if validation_results['empty_snapshots']:
+            print(f"\n⚠️  Empty snapshots ({len(validation_results['empty_snapshots'])}):")
+            for empty in validation_results['empty_snapshots'][:3]:  # Show first 3
+                print(f"   - {empty['file']} (step {empty['step']})")
+            if len(validation_results['empty_snapshots']) > 3:
+                print(f"   ... and {len(validation_results['empty_snapshots']) - 3} more")
+        
+        if validation_results['empty_labels']:
+            print(f"\n⚠️  Empty labels ({len(validation_results['empty_labels'])}):")
+            for empty in validation_results['empty_labels'][:3]:  # Show first 3
+                print(f"   - {empty['file']} (step {empty['step']})")
+            if len(validation_results['empty_labels']) > 3:
+                print(f"   ... and {len(validation_results['empty_labels']) - 3} more")
+        
+        if validation_results['data_integrity_issues']:
+            print(f"\n❌ Data integrity issues ({len(validation_results['data_integrity_issues'])}):")
+            for issue in validation_results['data_integrity_issues'][:3]:  # Show first 3
+                print(f"   - {issue['file']}: {issue['issue']}")
+            if len(validation_results['data_integrity_issues']) > 3:
+                print(f"   ... and {len(validation_results['data_integrity_issues']) - 3} more")
+        
+        if validation_results['invalid_pairs'] > 0:
+            print(f"\n❌ Validation failed! {validation_results['invalid_pairs']} pairs have issues.")
+            return False
+        else:
+            print(f"\n✅ All snapshot-label pairs are valid!")
+            return True
+
     def create_dataset(self):
+        # Validate snapshot and label pairs before processing (unless skipped)
+        if not self.skip_validation:
+            if not self.validate_snapshots_and_labels():
+                print("❌ Dataset creation aborted due to validation failures.")
+                return
+        else:
+            print("⚠️  Skipping snapshot-label validation as requested.")
+        
         print(f"Creating static junction data...")
         static_junction_ids_to_index, static_junction_features = self.process_junctions()
         
@@ -1160,6 +1441,13 @@ def main():
         default="eda_exports/mappings",
         help="Folder with mappings for vehicle, junction, and edge features (default: eda_exports/mappings)"
     )
+    
+    parser.add_argument(
+        "--skip_validation",
+        action="store_true",
+        default=False,
+        help="Skip snapshot-label validation (default: False)"
+    )
 
     args = parser.parse_args()
 
@@ -1175,7 +1463,8 @@ def main():
         args.filter_outliers,
         args.z_normalize,
         args.log_normalize,
-        args.mapping_folder
+        args.mapping_folder,
+        args.skip_validation
         )
     creator.create_dataset()
 
