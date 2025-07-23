@@ -5,33 +5,38 @@ x - Nodes (Junctions, Vehicle) main feature layout:
 | ----- | ------------------- | ------------------------------------------------------- |
 | 0     | `node_type`         | 0 = junction    1 = vehicle                             |
 | 1-3   | `veh_type_oh`       | ['bus', 'passenger', 'truck']`[0, 0, 0]` for junctions  |
-| 4     | `speed`             | z normalized                                            |
-| 5     | `acceleration`      | z normalized                                            |
+| 4     | `speed`             | min-max normalized if normalize, else raw               |
+| 5     | `acceleration`      | min-max normalized if normalize, else raw               |
 | 6     | `sin_hour`          | represent time in a unit circle                         |  
 | 7     | `cos_hour`          | represent time in a unit circle                         |  
 | 8     | `sin_day`           | represent day in a unit circle                          |  
 | 9     | `cos_day`           | represent day in a unit circle                          |  
-| 10    | `route_length`      | z normalized                                            |
-| 11    | `route_length_left` | z normalized                                            |
+| 10    | `route_length`      | min-max normalized if normalize, else raw               |
+| 11    | `route_length_left` | min-max normalized if normalize, else raw               |
 | 12-15 | `zone_oh`           | One-hot of zone (4 zones = 4 dims)                      |
-| 16    | `current_x`         | z normalized                                            |
-| 17    | `current_y`         | z normalized                                            |
-| 18    | `j_type`            | junction type, "priority", "traffic_light"              |
+| 16    | `current_x`         | min-max normalized if normalize, else raw               |
+| 17    | `current_y`         | min-max normalized if normalize, else raw               |
+| 18    | `j_type`            | junction type, "priority", "traffic_light"          |
 
 Total of 19 features per node.
 
 edge_features - Roads (static Edges) main feature layout:
 
 | Index | Feature Name        | Notes                                                   |
-
 | ----- | ---------------------- | ---------------------------------------------------- |
-| 0     | `avg_speed`            | z normalized                                         |
+| 0     | `avg_speed`            | min-max normalized if normalize, else raw            |
 | 1-3   | `num_lanes`            | One-hot of 1-3 lanes                                 |
-| 4     | `edge_demand`          | log + z-score normalized                             |
-| 5     | `edge_occupancy`       | z normalized                                         |
-| 6     | `length`               | z normalized (distance between from and to nodes)    |
+| 4     | `length`               | min-max normalized if normalize, else raw            |
+| 5     | `edge_demand`          | log+z-score normalized if log_normalize, else min-max if normalize, else raw |
+| 6     | `edge_occupancy`       | log+z-score normalized if log_normalize, else min-max if normalize, else raw |
 
 Total of 7 features per edge.
+
+Normalization options:
+- If `normalize` is True, min-max normalization is applied to most continuous features: (value - min) / (max - min).
+- If `log_normalize` is True, log+z-score normalization is applied to skewed/count features (edge_demand, edge_occupancy): log1p(value) - mean / std.
+- If both are False, raw values are used.
+- For edge_demand and edge_occupancy, log_normalize takes precedence over normalize.
 
 node indexing:
 
@@ -55,7 +60,6 @@ edge_type [0, 1, 1, 1, 2, 2 ,...]
 | 2              | Vehicle → Junction |
 | 3              | Vehicle → Vehicle  |
 
-
 Other Features
 current_edge - of shape: [num_vehicle_nodes], LongTensor of edge indices
 position_on_edge - of shape: [num_vehicle_nodes], LongTensor of edge indices
@@ -67,7 +71,7 @@ Snapshot pytorch geometric data structure:
 | ------------------ | ----------------------------- | ---------------------------------------------------------- |
 | `x`                | `[N_nodes, F_node]`           | Node features (junctions + vehicles)                       |
 | `edge_index`       | `[2, N_edges]`                | Source–target node indices (includes dynamic edges)        |
-| `edge_attr`        | `[N_edges, F_edge]`           | Edge feature vectors (e.g., speed, lanes, length, etc.)    |
+| `edge_attr`        | `[N_edges, F_edge]`           | Edge feature vectors (static and dynamic, see code)        |
 | `edge_type`        | `[N_edges]`                   | Edge type: int class                                       |
 | `current_edge`     | `[N_vehicles]`                | Index of current edge each vehicle is on                   |
 | `position_on_edge` | `[N_vehicles]`                | Normalized position (0 to 1) on current edge               |
@@ -75,9 +79,12 @@ Snapshot pytorch geometric data structure:
 | `junction_ids`     | `list[str]`                   | List of junction IDs                                       |
 | `edge_ids`         | `list[str]`                   | List of edge IDs                                           |
 | `vehicle_routes`   | `list[list[int]]`             | List of edge index sequences (routes) per vehicle          |
-| ------------------ | ----------------------------- | ---------------------------------------------------------- |
 | `y`                | `[N_vehicles]`                | Target label (ETA) per vehicle                             |
-| ------------------ | ----------------------------- | ---------------------------------------------------------- |
+| `y_equal_thirds`   | `[N_vehicles]`                | ETA category by equal thirds                               |
+| `y_quartile`       | `[N_vehicles]`                | ETA category by quartile                                   |
+| `y_mean_pm_0_5_std`| `[N_vehicles]`                | ETA category by mean±0.5std                                |
+| `y_median_pm_0_5_iqr`| `[N_vehicles]`              | ETA category by median±0.5IQR                              |
+| `y_binary_eta`     | `[N_vehicles]`                | Binary ETA label (short/long)                              |
 
 
 
@@ -94,6 +101,7 @@ from tqdm import tqdm
 from collections import defaultdict
 import math
 import re
+import random
 
 def extract_step_number(filename):
     match = re.search(r"step_(\d+)\.json", filename)
@@ -112,10 +120,12 @@ class DatasetCreator:
             eda_folder,
             out_graph_folder,
             filter_outliers,
-            z_normalize,
+            normalize,
             log_normalize,
             mapping_folder,
-            skip_validation=False
+            eta_analysis_methods_path,
+            skip_validation=False,
+            fast_validation=False
         ):
         # Load configuration
         
@@ -140,19 +150,57 @@ class DatasetCreator:
         self.junction_features_file = os.path.join(self.eda_dir, "junction_feature_summary.csv")
         self.label_features_file = os.path.join(self.eda_dir, "labels_feature_summary.csv")
         self.edge_route_count_file = os.path.join(self.eda_dir, "edge_route_count_summary.csv")
+        self.eta_analysis_methods_path = eta_analysis_methods_path
         
         if not self.check_required_files():
             raise FileNotFoundError("Required files for dataset creation are missing. Please ensure all necessary files are present in the specified directories.")
         with open(config) as f:
             self.config = json.load(f)
         self.filter_outliers = filter_outliers
-        self.normalize = z_normalize
+        self.normalize = normalize
         self.log_normalize = log_normalize
         self.skip_validation = skip_validation
+        self.fast_validation = fast_validation
         self.entities_data = {}
         self.populate_entities_data()
         self.is_init = True
         # self.print_entities_data()
+
+        # Load 99th percentile for total_travel_time_seconds from labels_feature_summary.csv
+        label_summary_path = os.path.join(self.eda_dir, "labels_feature_summary.csv")
+        label_summary_df = pd.read_csv(label_summary_path)
+        ttt_row = label_summary_df[label_summary_df['feature'] == 'total_travel_time_seconds']
+        if ttt_row.empty or '99%' not in ttt_row:
+            raise ValueError("Could not find 99th percentile for total_travel_time_seconds in labels_feature_summary.csv")
+        self.travel_time_99p = float(ttt_row['99%'].values[0])
+        self.travel_time_min = 180  # 3 minutes in seconds
+
+        # Load thresholds for all four methods from eta_analysis_methods.csv
+        if not os.path.exists(self.eta_analysis_methods_path):
+            raise FileNotFoundError(f"Missing eta_analysis_methods.csv at {self.eta_analysis_methods_path}")
+        methods_df = pd.read_csv(self.eta_analysis_methods_path)
+        self.method_thresholds = {}
+        for _, row in methods_df.iterrows():
+            method = row['method']
+            self.method_thresholds[method] = {
+                'short': float(row['short_threshold_seconds']),
+                'long': float(row['long_threshold_seconds'])
+            }
+        # Map verbose method names to short keys
+        self.method_key_map = {
+            'Equal Thirds (33.33%)': 'equal_thirds',
+            'Quartile-based (25-75)': 'quartile',
+            'Mean plus minus 0.5 Std': 'mean_pm_0_5_std',
+            'Median plus minus 0.5 IQR': 'median_pm_0_5_iqr',
+        }
+
+        # Load median ETA for binary threshold
+        label_summary_path = os.path.join(self.eda_dir, "labels_feature_summary.csv")
+        label_summary_df = pd.read_csv(label_summary_path)
+        eta_row = label_summary_df[label_summary_df['feature'] == 'eta']
+        if eta_row.empty or 'median' not in eta_row:
+            raise ValueError("Could not find median for eta in labels_feature_summary.csv")
+        self.eta_binary_threshold = float(eta_row['median'].values[0])
 
     def populate_entities_data(self):
         '''
@@ -194,17 +242,13 @@ class DatasetCreator:
                     if len(data_map) == 0:
                         print(f"Warning: {entity} mapping file '{mappings[i]}' contains no entries!.")
                         exit(1)
-                if entity == 'vehicle':
-                    # Sort vehicle IDs by numeric suffix to ensure consistent order
-                    self.entities_data[entity]['ids'] = sorted(
-                        data_map.keys(),
-                        key=extract_numeric_suffix
-                    )
-                else:
-                    # For junctions and edges, we can sort by keys directly
-                    self.entities_data[entity]['ids'] = sorted(data_map.keys())
+                # Enforce natural sorting for all entities
+                self.entities_data[entity]['ids'] = sorted(
+                    data_map.keys(),
+                    key=extract_numeric_suffix
+                )
                 print(f"entity {entity} has {len(self.entities_data[entity]['ids'])} ids")
-                print(f"self.entities_data['{entity}']['ids'][:5]", self.entities_data[entity]['ids'][:5])
+                print(f"self.entities_data['{entity}']['ids'][:20]", self.entities_data[entity]['ids'][:20])
                 self.entities_data[entity]['features'] = data_map
 
             df = pd.read_csv(statistics[i])
@@ -217,13 +261,18 @@ class DatasetCreator:
                     entry['std'] = float(row.get('std', 1.0))
                     entry['min'] = float(row.get('min', 0.0))
                     entry['max'] = float(row.get('max', 1.0))
+                    # add 97 98 99 percentile if available
+                    for p in [97, 98, 99]:
+                        percentile_name = f'{p}%'
+                        if percentile_name in row:
+                            entry[percentile_name] = float(row[percentile_name])
 
                 # Handle categorical features
                 elif row['type'] == 'categorical':
                     value_counts = parse_counts(row.get('value_counts', ''))
                     count = row.get('count', 0)
                     if count == 0:
-                        print(f"Warning: categorical count = 0 in '{self.junction_features_file}'")
+                        print(f"Warning: categorical count = 0 in '{statistics[i]}'")
                         exit(1)
                     entry['keys'] = sorted(value_counts.keys()) if value_counts else []
 
@@ -237,7 +286,9 @@ class DatasetCreator:
         required_files = [
             self.vehicle_mapping_file,
             self.junction_mapping_file,
-            self.edge_mapping_file
+            self.edge_mapping_file,
+            self.label_features_file,
+            self.eta_analysis_methods_path
         ]
         for file in required_files:
             if not os.path.exists(file):
@@ -380,11 +431,11 @@ class DatasetCreator:
         | Index | Feature Name        | Notes                                                   |
 
         | ----- | ---------------------- | ---------------------------------------------------- |
-        | 0     | `avg_speed`            | z normalized                                         |
+        | 0     | `avg_speed`            | normalized                                         |
         | 1-3   | `num_lanes`            | One-hot of 1-3 lanes                                 |
-        | 4     | `length`               | z normalized (distance between from and to nodes)    |
+        | 4     | `length`               | normalized (distance between from and to nodes)    |
         | 5     | `edge_demand`          | log + z-score normalized                             |
-        | 6     | `edge_occupancy`       | z normalized                                         |
+        | 6     | `edge_occupancy`       | normalized                                         |
 
         Total of 7 features per edge.
 
@@ -446,7 +497,7 @@ class DatasetCreator:
                 print(f"ERROR: Edge {eid} has no num_lanes defined. Terminating.")
                 exit(1)
             if num_lanes not in stats['num_lanes']['keys']:
-                print(f"ERROR: Edge {eid} has unknown num_lanes '{num_lanes}'. Terminating.")
+                print(f"ERROR: Edge {eid} has unknown num_lanes '{num_lanes}' where stats keys are {stats['num_lanes']['keys']}. Terminating.")
                 exit(1)
             num_lanes_index = stats['num_lanes']['keys'].index(num_lanes)
             num_lanes_oh = [0] * len(stats['num_lanes']['keys'])  # One-hot encoding for num_lanes
@@ -466,6 +517,14 @@ class DatasetCreator:
             static_edge_features.append(features)
         
         return  static_edge_index, static_edge_type, static_edge_ids_to_index, static_edge_features
+
+    def get_eta_category(self, eta, short_th, long_th):
+        if eta < short_th:
+            return 0  # short
+        elif eta < long_th:
+            return 1  # medium
+        else:
+            return 2  # long
 
     def process_labels(self, snap_file):
         """
@@ -491,38 +550,50 @@ class DatasetCreator:
         if not eta_stats:
             print(f"Warning: No 'eta' stats found in {self.label_features_file}. Terminating.")
             exit(1)
-        mean_eta = eta_stats.get("mean", 0.0)
-        std_eta = eta_stats.get("std", 1.0)
         
-        label_map = {}
-        valid_vehicle_ids = set()
-        if std_eta == 0.0:
-            std_eta = 1.0
-        filter_outliers_count = 0
+        filtered_label_map = {}
+        filtered_vehicle_ids = set()
+        y_cats = {k: [] for k in self.method_key_map.values()}
+        binary_threshold = self.eta_binary_threshold
+        y_binary = []
         for entry in label_data:
             eta = entry.get('eta')
             vid = entry.get('vehicle_id')
+            duration = entry.get('total_travel_time_seconds', 0)
             if eta is None or vid is None:
                 print(f"Warning: Missing 'eta' or 'vehicle_id' in label entry {entry}. Terminating.")
                 exit(1)
-
+            if not (self.travel_time_min <= duration <= self.travel_time_99p):
+                continue  # skip out-of-range
             if self.normalize :
-                # Use min-max normalization like other features
                 eta_final = (eta - eta_stats['min']) / (eta_stats['max'] - eta_stats['min'])
             else:
                 eta_final = eta
-
-            label_map[vid] = eta_final
-            valid_vehicle_ids.add(vid)
-        if len(label_map) != len(valid_vehicle_ids):
-            print(f"Warning: Mismatch in label_map and valid_vehicle_ids length. {len(label_map)} vs {len(valid_vehicle_ids)}")
+            filtered_label_map[vid] = eta_final
+            filtered_vehicle_ids.add(vid)
+            # Compute all label categories for this vehicle
+            for verbose, short_key in self.method_key_map.items():
+                th = self.method_thresholds[verbose]
+                y_cats[short_key].append(self.get_eta_category(eta, th['short'], th['long']))
+            # Binary label: 0 if short, 1 if long
+            y_binary.append(0 if eta < binary_threshold else 1)
+        if len(filtered_label_map) != len(filtered_vehicle_ids):
+            print(f"Warning: Mismatch in filtered_label_map and filtered_vehicle_ids length. {len(filtered_label_map)} vs {len(filtered_vehicle_ids)}")
             exit(1)
-        # sort the vehicle IDs to ensure consistent order
-        valid_vehicle_ids = sorted(valid_vehicle_ids, key=extract_numeric_suffix)
-        etas = [label_map[vid] for vid in valid_vehicle_ids]
+        filtered_vehicle_ids = sorted(filtered_vehicle_ids, key=extract_numeric_suffix)
+        etas = [filtered_label_map[vid] for vid in filtered_vehicle_ids]
         y = torch.FloatTensor(etas)
-
-        return y, valid_vehicle_ids
+        # Convert y_cats to tensors and validate
+        y_cat_tensors = {}
+        for k, v in y_cats.items():
+            t = torch.LongTensor([v[i] for i, vid in enumerate(filtered_vehicle_ids)]) if len(v) == len(filtered_vehicle_ids) else torch.LongTensor(v)
+            if len(t) != len(filtered_vehicle_ids):
+                raise ValueError(f"Mismatch: y_{k} ({len(t)}) vs filtered_vehicle_ids ({len(filtered_vehicle_ids)})")
+            y_cat_tensors[k] = t
+        y_binary_tensor = torch.LongTensor(y_binary)
+        if len(y_binary_tensor) != len(filtered_vehicle_ids):
+            raise ValueError(f"Mismatch: y_binary ({len(y_binary_tensor)}) vs filtered_vehicle_ids ({len(filtered_vehicle_ids)})")
+        return y, filtered_vehicle_ids, y_cat_tensors, y_binary_tensor
 
     def process_vehicle_features(self, snap_file, current_vehicle_ids, static_edge_ids_to_index, static_edge_features):
         """
@@ -774,7 +845,7 @@ class DatasetCreator:
         | ----- | ---------------------- | ---------------------------------------------------- |
         | 0     | `avg_speed`            | z normalized                                         |
         | 5     | `edge_demand`          | log + z-score normalized                             |
-        | 6     | `edge_occupancy`       | z normalized                                         |
+        | 6     | `edge_occupancy`       | log + z-score normalized                                         |
 
         Args:
             current_vehicle_ids (list): List of vehicle IDs present in the snapshot.
@@ -1223,12 +1294,69 @@ class DatasetCreator:
             print(f"\n✅ All snapshot-label pairs are valid!")
             return True
 
+    def fast_validate_snapshots_and_labels(self, sample_size=1000):
+        print("\n🔍 Fast validating snapshot-label pairs (sampled)...")
+        pairs = list(zip(self.snapshot_files, [f.replace('step_', 'labels_') for f in self.snapshot_files]))
+        if len(pairs) > sample_size:
+            pairs = random.sample(pairs, sample_size)
+        mismatches = 0
+        for snap_file, label_file in tqdm(pairs, desc="Validating pairs", unit="pair"):
+            snap_path = os.path.join(self.snapshots_folder, snap_file)
+            label_path = os.path.join(self.labels_folder, label_file)
+            if not os.path.exists(snap_path) or not os.path.exists(label_path):
+                print(f"Missing file: {snap_path if not os.path.exists(snap_path) else label_path}")
+                mismatches += 1
+                continue
+            try:
+                with open(snap_path, 'r') as f:
+                    snap_data = json.load(f)
+                with open(label_path, 'r') as f:
+                    label_data = json.load(f)
+            except Exception as e:
+                print(f"Error loading files: {snap_file}, {label_file}: {e}")
+                mismatches += 1
+                continue
+            vehicle_nodes = [node for node in snap_data.get('nodes', []) if node.get('node_type') == 1]
+            vehicle_ids = set(node.get('id') for node in vehicle_nodes)
+            if len(vehicle_nodes) != len(label_data):
+                print(f"Count mismatch: {snap_file} ({len(vehicle_nodes)} vehicles) vs {label_file} ({len(label_data)} labels)")
+                mismatches += 1
+                continue
+            # Check vehicle_id match and eta calculation
+            snap_step = snap_data.get('step', None)
+            for label in label_data:
+                vid = label.get('vehicle_id')
+                if vid not in vehicle_ids:
+                    print(f"Vehicle ID {vid} in label not found in snapshot {snap_file}")
+                    mismatches += 1
+                    break
+                # Validate ETA calculation if possible
+                dest = label.get('destination_time_sec')
+                eta = label.get('eta')
+                if snap_step is not None and dest is not None and eta is not None:
+                    expected_eta = max(dest - snap_step, 0)
+                    if eta != expected_eta:
+                        print(f"ETA mismatch for vehicle {vid} in {label_file}: label eta={eta}, expected {expected_eta} (dest={dest}, step={snap_step})")
+                        mismatches += 1
+                        break
+        print(f"\nFast validation complete. {len(pairs)} pairs checked, {mismatches} mismatches found.")
+        if mismatches > 0:
+            print("❌ Fast validation failed!")
+            return False
+        print("✅ Fast validation passed!")
+        return True
+
     def create_dataset(self):
         # Validate snapshot and label pairs before processing (unless skipped)
         if not self.skip_validation:
-            if not self.validate_snapshots_and_labels():
-                print("❌ Dataset creation aborted due to validation failures.")
-                return
+            if self.fast_validation:
+                if not self.fast_validate_snapshots_and_labels():
+                    print("❌ Dataset creation aborted due to fast validation failures.")
+                    return
+            else:
+                if not self.validate_snapshots_and_labels():
+                    print("❌ Dataset creation aborted due to validation failures.")
+                    return
         else:
             print("⚠️  Skipping snapshot-label validation as requested.")
         
@@ -1256,7 +1384,7 @@ class DatasetCreator:
         
         print(f"Converting {len(self.snapshot_files)} snapshots to PyG Data objects...")
         for snap_file in tqdm(self.snapshot_files, desc="Processing snapshots"):
-            y_tensor, current_vehicle_ids = self.process_labels(snap_file)
+            y_tensor, current_vehicle_ids, y_cat_tensors, y_binary_tensor = self.process_labels(snap_file)
             
             # Skip if no vehicles in this snapshot
             if len(current_vehicle_ids) == 0:
@@ -1354,7 +1482,6 @@ class DatasetCreator:
                         x=x_tensor,
                         edge_index=edge_index_tensor,
                         edge_type=edge_type_tensor,
-                        y=y_tensor,
                         edge_attr=full_edge_attr_tensor,
                         vehicle_ids=current_vehicle_ids,
                         junction_ids=list(static_junction_ids_to_index.keys()),
@@ -1362,7 +1489,14 @@ class DatasetCreator:
                         vehicle_routes=vehicle_routes_flat_tensor,
                         vehicle_route_splits=vehicle_route_splits_tensor,
                         current_vehicle_current_edges=current_vehicle_current_edges_tensor,
-                        current_vehicle_position_on_edges=current_vehicle_position_on_edges_tensor)
+                        current_vehicle_position_on_edges=current_vehicle_position_on_edges_tensor,
+                        y=y_tensor,
+                        y_equal_thirds=y_cat_tensors['equal_thirds'],
+                        y_quartile=y_cat_tensors['quartile'],
+                        y_mean_pm_0_5_std=y_cat_tensors['mean_pm_0_5_std'],
+                        y_median_pm_0_5_iqr=y_cat_tensors['median_pm_0_5_iqr'],
+                        y_binary_eta=y_binary_tensor
+            )
             
             # Final validation of the PyG Data object
             if data.x.shape[1] != expected_junction_features:
@@ -1422,10 +1556,10 @@ def main():
     )
 
     parser.add_argument(
-        "--z_normalize",
+        "--normalize",
         action="store_true",
         default=True,
-        help="Enable z-score normalization of feature and labels (default: True)"
+        help="Enable min-max normalization of feature and labels (default: True)"
     )
 
     parser.add_argument(
@@ -1445,8 +1579,22 @@ def main():
     parser.add_argument(
         "--skip_validation",
         action="store_true",
-        default=False,
+        default=True,
         help="Skip snapshot-label validation (default: False)"
+    )
+
+    parser.add_argument(
+        "--eta_analysis_methods_path",
+        type=str,
+        default="eda_exports/eta/eta_analysis_methods.csv",
+        help="Path to eta_analysis_methods.csv file (default: eda_exports/eta/eta_analysis_methods.csv)"
+    )
+
+    parser.add_argument(
+        "--fast_validation",
+        action="store_true",
+        default=True,
+        help="Enable fast validation by sampling 1000 snapshot-label pairs."
     )
 
     args = parser.parse_args()
@@ -1461,10 +1609,12 @@ def main():
         args.eda_folder,
         args.out_graph_folder,
         args.filter_outliers,
-        args.z_normalize,
+        args.normalize,
         args.log_normalize,
         args.mapping_folder,
-        args.skip_validation
+        args.eta_analysis_methods_path,
+        args.skip_validation,
+        args.fast_validation
         )
     creator.create_dataset()
 

@@ -1076,22 +1076,36 @@ class SimManager:
         Generates mapping files for vehicles, junctions, and roads.
         Each file contains a mapping from IDs to their respective attributes.
         """
+        import re
+        
+        def natural_sort_key(text):
+            """
+            Convert a string into a list of string and number chunks.
+            "AA10A" becomes ["AA", 10, "A"]
+            """
+            def atoi(text):
+                return int(text) if text.isdigit() else text
+            return [atoi(c) for c in re.split(r'(\d+)', text)]
+        
         os.makedirs(mapping_dir, exist_ok=True)
 
-        # Vehicles
+        # Vehicles - sort by natural order
         vehicle_mapping = {v.id: v.to_dict() for v in self.db.vehicles.values()}
+        sorted_vehicle_mapping = dict(sorted(vehicle_mapping.items(), key=lambda x: natural_sort_key(x[0])))
         with open(os.path.join(mapping_dir, "vehicle_mapping.json"), "w") as f:
-            json.dump(vehicle_mapping, f, indent=2)
+            json.dump(sorted_vehicle_mapping, f, indent=2)
 
-        # Junctions
+        # Junctions - sort by natural order
         junction_mapping = {j.id: j.to_dict() for j in self.db.junctions.values()}
+        sorted_junction_mapping = dict(sorted(junction_mapping.items(), key=lambda x: natural_sort_key(x[0])))
         with open(os.path.join(mapping_dir, "junction_mapping.json"), "w") as f:
-            json.dump(junction_mapping, f, indent=2)
+            json.dump(sorted_junction_mapping, f, indent=2)
 
-        # Roads
+        # Roads - sort by natural order
         edge_mapping = {r.id: r.to_dict() for r in self.db.roads.values()}
+        sorted_edge_mapping = dict(sorted(edge_mapping.items(), key=lambda x: natural_sort_key(x[0])))
         with open(os.path.join(mapping_dir, "edge_mapping.json"), "w") as f:
-            json.dump(edge_mapping, f, indent=2)
+            json.dump(sorted_edge_mapping, f, indent=2)
         
         print(f"ID mappings saved to {mapping_dir}/")
         print(f"Total vehicles: {len(self.db.vehicles)}")
