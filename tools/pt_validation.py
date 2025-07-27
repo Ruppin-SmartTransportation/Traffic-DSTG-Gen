@@ -183,7 +183,7 @@ def main():
     parser.add_argument(
         "--pt_folder",
         type=str,
-        default="/media/guy/StorageVolume/traffic_data_pt",
+        default="/home/guy/Projects/Traffic/traffic_data_pt",
         help="Folder with .pt graph files"
     )
     parser.add_argument(
