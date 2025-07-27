@@ -1,4 +1,4 @@
-'''
+"""
 x - Nodes (Junctions, Vehicle) main feature layout:
 
 | Index | Feature Name        | Notes                                                   |
@@ -12,13 +12,18 @@ x - Nodes (Junctions, Vehicle) main feature layout:
 | 8     | `sin_day`           | represent day in a unit circle                          |  
 | 9     | `cos_day`           | represent day in a unit circle                          |  
 | 10    | `route_length`      | min-max normalized if normalize, else raw               |
-| 11    | `route_length_left` | min-max normalized if normalize, else raw               |
+| 11    | `progress`          | trip progress: 1 - (route_length_left / route_length)   |
 | 12-15 | `zone_oh`           | One-hot of zone (4 zones = 4 dims)                      |
 | 16    | `current_x`         | min-max normalized if normalize, else raw               |
 | 17    | `current_y`         | min-max normalized if normalize, else raw               |
-| 18    | `j_type`            | junction type, "priority", "traffic_light"          |
+| 18    | `destination_x`     | Normalized or raw; for vehicles only                     |
+| 19    | `destination_y`     | Normalized or raw; for vehicles only                     |
+| 20-22 | `current_edge_num_lanes_oh` | One-hot: [1,2,3] lanes; [0,0,0] for junctions         |
+| 23    | `current_edge_demand`     | Demand value for the current edge (from updated edge features) |
+| 24    | `current_edge_occupancy`  | Occupancy value for the current edge (from updated edge features) |
+| 25    | `j_type`            | Junction type (priority/traffic_light); 0 for vehicles  |
 
-Total of 19 features per node.
+Total of 26 features per node.
 
 edge_features - Roads (static Edges) main feature layout:
 
@@ -86,9 +91,7 @@ Snapshot pytorch geometric data structure:
 | `y_median_pm_0_5_iqr`| `[N_vehicles]`              | ETA category by median±0.5IQR                              |
 | `y_binary_eta`     | `[N_vehicles]`                | Binary ETA label (short/long)                              |
 
-
-
-'''
+"""
 import os
 import json
 import torch
@@ -110,6 +113,40 @@ def extract_step_number(filename):
 def extract_numeric_suffix(s):
     match = re.search(r'(\d+)$', s)
     return int(match.group(1)) if match else float('inf')
+
+# Global variable for node feature names (order matters, j_type is last)
+NODE_FEATURE_NAMES = [
+    'node_type', # 0
+    'veh_type_oh_0', 'veh_type_oh_1', 'veh_type_oh_2', # 1-3
+    'speed', # 4
+    'acceleration', # 5
+    'sin_hour', # 6
+    'cos_hour', # 7
+    'sin_day', # 8
+    'cos_day', # 9
+    'route_length', # 10
+    'progress', # 11
+    'zone_oh_0', 'zone_oh_1', 'zone_oh_2', 'zone_oh_3', # 12-15
+    'current_x', # 16
+    'current_y', # 17
+    'destination_x', # 18
+    'destination_y', # 19
+    'current_edge_num_lanes_oh_0', 'current_edge_num_lanes_oh_1', 'current_edge_num_lanes_oh_2', # 20-22
+    'current_edge_demand', # 23
+    'current_edge_occupancy',
+    'j_type'  # Always last
+]
+
+NODE_FEATURES_COUNT = len(NODE_FEATURE_NAMES)
+EDGE_FEATURES_COUNT = 7
+# Global variable for edge feature names (order matters)
+EDGE_FEATURE_NAMES = [
+    'avg_speed',
+    'num_lanes_oh_0', 'num_lanes_oh_1', 'num_lanes_oh_2',
+    'length',
+    'edge_demand',
+    'edge_occupancy'
+]
 
 class DatasetCreator:
     def __init__(
@@ -325,36 +362,11 @@ class DatasetCreator:
         return True
 
     def process_junctions(self):
-        '''
-        entity junction has 362 ids
-        ['AA0', 'AA1', 'AA10', 'AA2', 'AA3']
-        [junction]['stats'][id] {'keys': []}
-        [junction]['stats'][node_type] {'mean': 1.0, 'std': 0.0, 'min': 1.0, 'max': 1.0}
-        [junction]['stats'][x] {'mean': 8944.463176795582, 'std': 5522.114834273921, 'min': 0.0, 'max': 18000.0}
-        [junction]['stats'][y] {'mean': 405.8405524861883, 'std': 3351.537530194094, 'min': -6264.96, 'max': 5000.0}
-        [junction]['stats'][type] {'keys': ['priority', 'traffic_light']}
-        [junction]['stats'][zone] {'keys': ['A', 'B', 'C', 'H']}
-
-        | Index | Feature Name        | Notes                                                   |
-        | ----- | ------------------- | ------------------------------------------------------- |
-        | 0     | `node_type`         | 0 = junction    1 = vehicle                             |
-        | 1-3   | `veh_type_oh`       | ['bus', 'passenger', 'truck']`[0, 0, 0]` for junctions  |
-        | 4     | `speed`             | z normalized                                            |
-        | 5     | `acceleration`      | z normalized                                            |
-        | 6     | `sin_hour`          | represent time in a unit circle                         |    
-        | 7     | `cos_hour`          | represent time in a unit circle                         |    
-        | 8     | `sin_day`           | represent day in a unit circle                          |    
-        | 9     | `cos_day`           | represent day in a unit circle                          |   
-        | 10    | `route_length`      | z normalized                                            |
-        | 11    | `route_length_left` | z normalized                                            |
-        | 12-15 | `zone_oh`           | One-hot of zone (4 zones = 4 dims)                      |
-        | 16    | `current_x`         | z normalized                                            |
-        | 17    | `current_y`         | z normalized                                            |
-        | 18    | `j_type`            | junction type, "priority", "traffic_light"              |
-
-        Total of 19 features per node.
-
-        '''
+        """
+        Processes junction nodes and constructs their feature vectors.
+        The feature vector layout matches NODE_FEATURE_NAMES (length 26), with j_type as the last feature.
+        For junctions, vehicle-specific features (e.g., speed, acceleration, destination_x/y, current_edge_num_lanes_oh, current_edge_demand, current_edge_occupancy) are set to 0 or [0,0,0] as appropriate.
+        """
         stats = self.entities_data['junction']['stats']
         junction_ids = self.entities_data['junction']['ids']
         if len(junction_ids) == 0:
@@ -365,52 +377,35 @@ class DatasetCreator:
         static_features = self.entities_data['junction']['features']
         junction_features = []
         for jid in junction_ids:    
-            features = [0] * 19  # Initialize with zeros for all 19 features
-            # junction node feature are node_type (0), veh_type_oh (zeros), speed (0), acceleration (0), 
-            # sin_hour, cos_hour, sin_day, cos_day, route_length (0), route_length_left (0), 
-            # zone (one hot), current_x, current_y, j_type
-            
+            features = [0] * NODE_FEATURES_COUNT  # Initialize with zeros for all features
+            # Fill in junction-specific features
             features[0] = 0  # node_type = 0 for junction
-            
-            # veh_type_oh = [0, 0, 0] for junctions (already initialized as zeros)
-            # speed = 0 for junctions (already initialized as zero)
-            # acceleration = 0 for junctions (already initialized as zero)
-            
-            # sin_hour, cos_hour, sin_day, cos_day - will be set to 0 for junctions
-            # (these are time-dependent features that don't apply to static junctions)
-            # route_length = 0 for junctions (already initialized as zero)
-            # route_length_left = 0 for junctions (already initialized as zero)
-            
             # zone_oh (one-hot encoding)
-            zone_oh = [0] * len(stats['zone']['keys'])  # One-hot encoding for zone
-            zone = static_features[jid].get('zone', '_')  # Default to '_' if not found
+            zone_oh = [0] * len(stats['zone']['keys'])
+            zone = static_features[jid].get('zone', '_')
             if zone not in stats['zone']['keys']:
                 print(f"ERROR: Junction {jid} has unknown zone '{zone}'. Terminating.")
                 exit(1)
             zone_index = stats['zone']['keys'].index(zone)
-            zone_oh[zone_index] = 1  # Set the correct zone index to 1
-            features[12:16] = zone_oh  # Add one-hot zone features at indices 12-15
-            
-            # current_x, current_y (junction coordinates)
+            features[12 + zone_index] = 1  # zone_oh at indices 12-15
+            # current_x, current_y
             x = static_features[jid].get('x', 0.0)
             y = static_features[jid].get('y', 0.0)
             if x is None or y is None:
                 print(f"ERROR: Junction {jid} has no x or y defined. Terminating.")
                 exit(1)
-            if self.normalize: # use min-max normalization instead of z-score
+            if self.normalize:
                 x = (x - stats['x']['min']) / (stats['x']['max'] - stats['x']['min'])
                 y = (y - stats['y']['min']) / (stats['y']['max'] - stats['y']['min'])
-           
-            features[16] = x  # current_x
-            features[17] = y  # current_y
-            
-            # j_type (junction type)
+            features[16] = x
+            features[17] = y
+            # j_type (junction type) as last feature
             j_type = static_features[jid].get('type', 'unknown')
             if j_type not in stats['type']['keys']:
                 print(f"ERROR: Junction {jid} has unknown type '{j_type}'. Terminating.")
                 exit(1)
-            features[18] = stats['type']['keys'].index(j_type)  # Convert type to index
-            
+            features[NODE_FEATURES_COUNT - 1] = stats['type']['keys'].index(j_type)
+            # All other features (vehicle-specific) remain 0
             junction_features.append(features)
         print(f"Processed {len(junction_features)} junction features and create {len(junction_ids_to_index.keys())} indices.")
 
@@ -551,20 +546,46 @@ class DatasetCreator:
             print(f"Warning: No 'eta' stats found in {self.label_features_file}. Terminating.")
             exit(1)
         
+        # Initialize counters for detailed logging
+        total_labels = len(label_data)
+        filtered_out_duration = 0
+        filtered_out_missing_data = 0
+        kept_vehicles = 0
+        
+        print(f"\n🔍 Processing labels for {snap_file}:")
+        print(f"   Total labels in file: {total_labels}")
+        print(f"   Duration filter range: {self.travel_time_min}s - {self.travel_time_99p}s")
+        
         filtered_label_map = {}
         filtered_vehicle_ids = set()
         y_cats = {k: [] for k in self.method_key_map.values()}
         binary_threshold = self.eta_binary_threshold
         y_binary = []
+        
         for entry in label_data:
             eta = entry.get('eta')
             vid = entry.get('vehicle_id')
             duration = entry.get('total_travel_time_seconds', 0)
+            
+            # Check for missing data
             if eta is None or vid is None:
-                print(f"Warning: Missing 'eta' or 'vehicle_id' in label entry {entry}. Terminating.")
-                exit(1)
+                print(f"   ❌ {vid}: Missing 'eta' or 'vehicle_id' in label entry {entry}")
+                filtered_out_missing_data += 1
+                continue
+            
+            # Check duration filter
             if not (self.travel_time_min <= duration <= self.travel_time_99p):
-                continue  # skip out-of-range
+                if duration < self.travel_time_min:
+                    print(f"   ❌ {vid}: Duration {duration:.0f}s < {self.travel_time_min}s (FILTERED - too short)")
+                else:
+                    print(f"   ❌ {vid}: Duration {duration:.0f}s > {self.travel_time_99p}s (FILTERED - too long)")
+                filtered_out_duration += 1
+                continue
+            
+            # Vehicle passed all filters
+            print(f"   ✅ {vid}: Duration {duration:.0f}s, ETA {eta:.0f}s (KEPT)")
+            kept_vehicles += 1
+            
             if self.normalize :
                 eta_final = (eta - eta_stats['min']) / (eta_stats['max'] - eta_stats['min'])
             else:
@@ -577,9 +598,23 @@ class DatasetCreator:
                 y_cats[short_key].append(self.get_eta_category(eta, th['short'], th['long']))
             # Binary label: 0 if short, 1 if long
             y_binary.append(0 if eta < binary_threshold else 1)
+        
+        # Print summary
+        print(f"\n📊 Label Processing Summary for {snap_file}:")
+        print(f"   ✅ Kept vehicles: {kept_vehicles}")
+        print(f"   ❌ Filtered out (duration): {filtered_out_duration}")
+        print(f"   ❌ Filtered out (missing data): {filtered_out_missing_data}")
+        print(f"   📈 Success rate: {kept_vehicles}/{total_labels} ({100*kept_vehicles/total_labels:.1f}%)")
+        
         if len(filtered_label_map) != len(filtered_vehicle_ids):
             print(f"Warning: Mismatch in filtered_label_map and filtered_vehicle_ids length. {len(filtered_label_map)} vs {len(filtered_vehicle_ids)}")
             exit(1)
+        
+        # Additional validation
+        if kept_vehicles == 0:
+            print(f"⚠️  WARNING: No vehicles passed filtering for {snap_file}")
+        elif kept_vehicles < total_labels * 0.5:  # Less than 50% success rate
+            print(f"⚠️  WARNING: Low filtering success rate for {snap_file} ({100*kept_vehicles/total_labels:.1f}%)")
         filtered_vehicle_ids = sorted(filtered_vehicle_ids, key=extract_numeric_suffix)
         etas = [filtered_label_map[vid] for vid in filtered_vehicle_ids]
         y = torch.FloatTensor(etas)
@@ -648,11 +683,18 @@ class DatasetCreator:
         | 8     | `sin_day`           | represent day in a unit circle                          |
         | 9     | `cos_day`           | represent day in a unit circle                          |
         | 10    | `route_length`      | z normalized                                            |
-        | 11    | `route_length_left` | z normalized                                            |
+        | 11    | `progress`          | trip progress: 1 - (route_length_left / route_length)   |
         | 12-15 | `zone_oh`           | One-hot of zone (4 zones = 4 dims)                      |
         | 16    | `current_x`         | z normalized                                            |
         | 17    | `current_y`         | z normalized                                            |
-        | 18    | `j_type`            | junction type, "priority", "traffic_light"              |
+        | 18    | `destination_x`     | normalized destination x coordinate                      |
+        | 19    | `destination_y`     | normalized destination y coordinate                      |
+        | 20-22 | `current_edge_num_lanes_oh` | one-hot encoding of current edge's num_lanes (1, 2, or 3 lanes); [0,0,0] for junctions |
+        | 23    | `current_edge_demand`     | Demand value for the current edge (from updated edge features) |
+        | 24    | `current_edge_occupancy`  | Occupancy value for the current edge (from updated edge features) |
+        | 25    | `j_type`            | Junction type (priority/traffic_light); 0 for vehicles  |
+
+        Total of 26 features per node.
 
         """
         snap_path = os.path.join(self.snapshots_folder, snap_file)
@@ -673,6 +715,12 @@ class DatasetCreator:
         if len(vehicle_nodes) < len(current_vehicle_ids):
             print(f"ERROR: Snapshot {snap_file} has fewer vehicle nodes ({len(vehicle_nodes)}) than expected ({len(current_vehicle_ids)}). Terminating.")
             exit(1)
+        
+        print(f"🔍 Processing vehicle features for {snap_file}:")
+        print(f"   📊 Total nodes in snapshot: {len(nodes)}")
+        print(f"   🚗 Vehicle nodes in snapshot: {len(vehicle_nodes)}")
+        print(f"   🎯 Expected vehicles (from labels): {len(current_vehicle_ids)}")
+        print(f"   ✅ Vehicle coverage: {len(current_vehicle_ids)}/{len(vehicle_nodes)} ({100*len(current_vehicle_ids)/len(vehicle_nodes):.1f}%)")
         #sort vehicle nodes by their IDs to ensure consistent order
         vehicle_nodes = sorted(vehicle_nodes, key=lambda x: extract_numeric_suffix(x.get('id', '')))
         features = []
@@ -695,7 +743,7 @@ class DatasetCreator:
             if vehicle_node['node_type'] != 1:
                 print(f"ERROR: Vehicle {vid} node_type is not 1 (vehicle). Found: {vehicle_node['node_type']}. Terminating.")
                 exit(1)
-            feature.append(1)  # node_type = 1 for vehicle
+            feature.append(1)  # [0] node_type = 1 for vehicle
             if 'vehicle_type' not in vehicle_node:
                 print(f"ERROR: Vehicle {vid} node does not have 'vehicle_type' defined. Terminating.")
                 exit(1)
@@ -715,7 +763,7 @@ class DatasetCreator:
             # Get the index of the vehicle type in the keys
             veh_type_index = vehicle_stats['vehicle_type']['keys'].index(veh_type)
             veh_type_oh[veh_type_index] = 1  # Set the correct vehicle type index to 1
-            feature.extend(veh_type_oh)  # Add one-hot vehicle type features
+            feature.extend(veh_type_oh)  # [1-3] Add one-hot vehicle type features
             # speed
             speed = vehicle_node.get('speed', None)
             if speed is None:
@@ -723,7 +771,7 @@ class DatasetCreator:
                 exit(1)
             if self.normalize: # use min-max normalization instead of z-score
                 speed = (speed - vehicle_stats['speed']['min']) / (vehicle_stats['speed']['max'] - vehicle_stats['speed']['min'])
-            feature.append(speed)
+            feature.append(speed) # [4]
             # acceleration
             acceleration = vehicle_node.get('acceleration', None)
             if acceleration is None:
@@ -731,7 +779,7 @@ class DatasetCreator:
                 exit(1)
             if self.normalize: # use min-max normalization instead of z-score
                 acceleration = (acceleration - vehicle_stats['acceleration']['min']) / (vehicle_stats['acceleration']['max'] - vehicle_stats['acceleration']['min'])   
-            feature.append(acceleration)
+            feature.append(acceleration) # [5]
             # sin_hour, cos_hour, sin_day, cos_day
             timestamp = snapshot_data.get('step', -1) # step is the timestamp in seconds in steps of 60 seconds
             if timestamp == -1 or not isinstance(timestamp, (int, float)):
@@ -744,10 +792,10 @@ class DatasetCreator:
             hour = hours % 24  # Get the hour of the day (0-23)
             minutes = minutes % 60  # Get the minutes (0-59)
             hour = (hour + minutes / 60) % 24  # Convert to hour in the range [0, 24)
-            feature.append(math.sin(2 * math.pi * hour / 24))  # sin_hour
-            feature.append(math.cos(2 * math.pi * hour / 24))  # cos_hour
-            feature.append(math.sin(2 * math.pi * day / 7))  # sin_day
-            feature.append(math.cos(2 * math.pi * day / 7))  # cos_day
+            feature.append(math.sin(2 * math.pi * hour / 24))  # sin_hour [6]
+            feature.append(math.cos(2 * math.pi * hour / 24))  # cos_hour [7]
+            feature.append(math.sin(2 * math.pi * day / 7))  # sin_day [8]
+            feature.append(math.cos(2 * math.pi * day / 7))  # cos_day [9]
             # route_length 
             route_length = vehicle_node.get('route_length', None)
             if route_length is None:
@@ -755,15 +803,18 @@ class DatasetCreator:
                 exit(1)
             if self.normalize: # use min-max normalization instead of z-score
                 route_length = (route_length - vehicle_stats['route_length']['min']) / (vehicle_stats['route_length']['max'] - vehicle_stats['route_length']['min'])
-            feature.append(route_length)
-            # route_length_left
+            feature.append(route_length) # [10]
+            # progress (1 - route_length_left / route_length)
             route_length_left = vehicle_node.get('route_length_left', None)
             if route_length_left is None:
                 print(f"ERROR: Vehicle {vid} has no route_length_left defined. Terminating.")
                 exit(1)
-            if self.normalize: # use min-max normalization instead of z-score
-                route_length_left = (route_length_left - vehicle_stats['route_length_left']['min']) / (vehicle_stats['route_length_left']['max'] - vehicle_stats['route_length_left']['min'])
-            feature.append(route_length_left)
+            if route_length == 0:
+                print(f"ERROR: Vehicle {vid} has no route_length defined. Terminating.")
+                exit(1)
+            else:
+                progress = 1.0 - (route_length_left / route_length)
+            feature.append(progress) # [11]
             # zone_oh
             zone_oh = [0] * len(vehicle_stats['current_zone']['keys'])
             current_zone = vehicle_node.get('current_zone', None)
@@ -775,7 +826,7 @@ class DatasetCreator:
                 exit(1)
             zone_index = vehicle_stats['current_zone']['keys'].index(current_zone)
             zone_oh[zone_index] = 1  # Set the correct zone index to 1
-            feature.extend(zone_oh)  # Add one-hot zone features
+            feature.extend(zone_oh)  # Add one-hot zone features [12-15]
             # current_x, current_y
             current_x = vehicle_node.get('current_x', None)
             current_y = vehicle_node.get('current_y', None)
@@ -785,10 +836,51 @@ class DatasetCreator:
             if self.normalize: # use min-max normalization instead of z-score
                 current_x = (current_x - vehicle_stats['current_x']['min']) / (vehicle_stats['current_x']['max'] - vehicle_stats['current_x']['min'])
                 current_y = (current_y - vehicle_stats['current_y']['min']) / (vehicle_stats['current_y']['max'] - vehicle_stats['current_y']['min'])
-            feature.append(current_x)
-            feature.append(current_y)
+            feature.append(current_x) # [16]
+            feature.append(current_y) # [17]
             # j_type is the junction type, not relevant for vehicles, but we need to add it to the feature vector set to 0
-            feature.append(0)  # j_type = 0 for vehicle (not relevant)
+            # destination_x
+            destination_x = vehicle_node.get('destination_x', None)
+            if destination_x is None:
+                print(f"ERROR: Vehicle {vid} has no destination_x defined. Terminating.")
+                exit(1)
+            if self.normalize:
+                destination_x = (destination_x - vehicle_stats['destination_x']['min']) / (vehicle_stats['destination_x']['max'] - vehicle_stats['destination_x']['min'])
+            feature.append(destination_x) # [18]
+            # destination_y
+            destination_y = vehicle_node.get('destination_y', None)
+            if destination_y is None:
+                print(f"ERROR: Vehicle {vid} has no destination_y defined. Terminating.")
+                exit(1)
+            if self.normalize:
+                destination_y = (destination_y - vehicle_stats['destination_y']['min']) / (vehicle_stats['destination_y']['max'] - vehicle_stats['destination_y']['min'])
+            feature.append(destination_y) # [19]
+            # current edge num_lanes (one-hot)
+            current_edge_str = vehicle_node.get('current_edge', None)
+            if current_edge_str is None:
+                print(f"ERROR: Vehicle {vid} has no current_edge defined. Terminating.")
+                exit(1)
+            # Get num_lanes for the current edge
+            edge_features_map = self.entities_data['edge']['features']
+            edge_stats = self.entities_data['edge']['stats']
+            if current_edge_str not in edge_features_map:
+                print(f"ERROR: Current edge {current_edge_str} not found in edge features map. Terminating.")
+                exit(1)
+            num_lanes = edge_features_map[current_edge_str].get('num_lanes', None)
+            if num_lanes is None:
+                print(f"ERROR: Edge {current_edge_str} has no num_lanes defined. Terminating.")
+                exit(1)
+            num_lanes_keys = edge_stats['num_lanes']['keys']
+            if num_lanes not in num_lanes_keys:
+                print(f"ERROR: Edge {current_edge_str} has unknown num_lanes '{num_lanes}'. Terminating.")
+                exit(1)
+            num_lanes_oh = [0] * len(num_lanes_keys)
+            num_lanes_index = num_lanes_keys.index(num_lanes)
+            num_lanes_oh[num_lanes_index] = 1
+            feature.extend(num_lanes_oh)  # [21-22] 
+            feature.append(0.0)  # current_edge_demand placeholder [23]
+            feature.append(0.0)  # current_edge_occupancy placeholder [24]
+            feature.append(0)    # j_type (index 25, always 0 for vehicles)
             # Add the feature vector to the list
             features.append(feature)
 
@@ -1364,55 +1456,56 @@ class DatasetCreator:
         static_junction_ids_to_index, static_junction_features = self.process_junctions()
         
         # Validate junction features
-        expected_junction_features = 19
         for i, features in enumerate(static_junction_features):
-            if len(features) != expected_junction_features:
-                print(f"ERROR: Junction {i} has {len(features)} features, expected {expected_junction_features}. Terminating.")
+            if len(features) != NODE_FEATURES_COUNT:
+                print(f"ERROR: Junction {i} has {len(features)} features, expected {NODE_FEATURES_COUNT}. Terminating.")
                 exit(1)
-        print(f"✓ Junction features validated: {len(static_junction_features)} junctions with {expected_junction_features} features each")
+        print(f"✓ Junction features validated: {len(static_junction_features)} junctions with {NODE_FEATURES_COUNT} features each")
         
         print("creating static edge data...")
         static_edge_index, static_edge_type, static_edge_ids_to_index, static_edge_features = self.process_static_edges(static_junction_ids_to_index)   
         
         # Validate edge features
-        expected_edge_features = 7
         for i, features in enumerate(static_edge_features):
-            if len(features) != expected_edge_features:
-                print(f"ERROR: Edge {i} has {len(features)} features, expected {expected_edge_features}. Terminating.")
+            if len(features) != EDGE_FEATURES_COUNT:
+                print(f"ERROR: Edge {i} has {len(features)} features, expected {EDGE_FEATURES_COUNT}. Terminating.")
                 exit(1)
-        print(f"✓ Edge features validated: {len(static_edge_features)} edges with {expected_edge_features} features each")
+        print(f"✓ Edge features validated: {len(static_edge_features)} edges with {EDGE_FEATURES_COUNT} features each")
         
         print(f"Converting {len(self.snapshot_files)} snapshots to PyG Data objects...")
+        total_snapshots_processed = 0
+        total_snapshots_skipped = 0
+        
         for snap_file in tqdm(self.snapshot_files, desc="Processing snapshots"):
+            print(f"\n{'='*60}")
+            print(f"Processing snapshot: {snap_file}")
+            print(f"{'='*60}")
+            
             y_tensor, current_vehicle_ids, y_cat_tensors, y_binary_tensor = self.process_labels(snap_file)
             
             # Skip if no vehicles in this snapshot
             if len(current_vehicle_ids) == 0:
-                print(f"WARNING: Snapshot {snap_file} has no vehicles. Skipping.")
+                print(f"⚠️  WARNING: Snapshot {snap_file} has no vehicles after filtering. Skipping.")
+                total_snapshots_skipped += 1
                 continue
+            
+            print(f"✅ Proceeding with {len(current_vehicle_ids)} vehicles for snapshot {snap_file}")
+            total_snapshots_processed += 1
                 
             snapshot_data, vehicle_features, vehicle_routes_flat, vehicle_route_splits, current_vehicle_current_edges, current_vehicle_position_on_edges  = self.process_vehicle_features(snap_file, current_vehicle_ids, static_edge_ids_to_index, static_edge_features)
             
             # Validate vehicle features
-            expected_vehicle_features = 19
             for i, features in enumerate(vehicle_features):
-                if len(features) != expected_vehicle_features:
-                    print(f"ERROR: Vehicle {i} has {len(features)} features, expected {expected_vehicle_features}. Terminating.")
+                if len(features) != NODE_FEATURES_COUNT:
+                    print(f"ERROR: Vehicle {current_vehicle_ids[i]} has {len(features)} features, expected {NODE_FEATURES_COUNT}. Terminating.")
                     exit(1)
             
-            x = [*static_junction_features, *vehicle_features]  # Combine static junction features with vehicle features
-            x_tensor = torch.FloatTensor(x) # nodes features tensor = [static junction features, vehicle features]
             vehicle_routes_flat_tensor = torch.LongTensor(vehicle_routes_flat)
             vehicle_route_splits_tensor = torch.LongTensor(vehicle_route_splits)
             current_vehicle_current_edges_tensor = torch.LongTensor(current_vehicle_current_edges)
             current_vehicle_position_on_edges_tensor = torch.FloatTensor(current_vehicle_position_on_edges)
 
-
-            
-            
-            if len(x_tensor) != len(static_junction_features) + len(current_vehicle_ids):
-                print(f"ERROR: x_tensor length {len(x_tensor)} does not match expected length {len(static_junction_features) + len(current_vehicle_ids)}. Terminating.")
-                exit(1)
+           
             if len(y_tensor) != len(current_vehicle_ids):
                 print(f"ERROR: y_tensor length {len(y_tensor)} does not match current_vehicle_ids length {len(current_vehicle_ids)}. Terminating.")
                 exit(1)
@@ -1428,10 +1521,25 @@ class DatasetCreator:
             
             # Validate updated edge features
             for i, features in enumerate(static_edge_features_updated):
-                if len(features) != expected_edge_features:
-                    print(f"ERROR: Updated edge {i} has {len(features)} features, expected {expected_edge_features}. Terminating.")
+                if len(features) != EDGE_FEATURES_COUNT:
+                    print(f"ERROR: Updated edge {i} has {len(features)} features, expected {EDGE_FEATURES_COUNT}. Terminating.")
                     exit(1)
-            
+
+            # 1. get vehicle features
+            # 2. for each vehicle, update edge demand and occupancy from static_edge_features_updated
+
+            for idx, veh_features in enumerate(vehicle_features):
+                veh_features[23] = static_edge_features_updated[veh_features[22]][5]
+                veh_features[24] = static_edge_features_updated[veh_features[22]][6]
+
+
+            x = [*static_junction_features, *vehicle_features]  # Combine static junction features with vehicle features
+            x_tensor = torch.FloatTensor(x) # nodes features tensor = [static junction features, vehicle features]
+ 
+            if len(x_tensor) != len(static_junction_features) + len(current_vehicle_ids):
+                print(f"ERROR: x_tensor length {len(x_tensor)} does not match expected length {len(static_junction_features) + len(current_vehicle_ids)}. Terminating.")
+                exit(1)
+
             dynamic_edge_index, dynamic_edge_type, dynamic_edge_attr = self.construct_dynamic_edges(
                 current_vehicle_ids=current_vehicle_ids,
                 current_vehicle_current_edges=current_vehicle_current_edges_tensor,
@@ -1499,60 +1607,70 @@ class DatasetCreator:
             )
             
             # Final validation of the PyG Data object
-            if data.x.shape[1] != expected_junction_features:
-                print(f"ERROR: Final node features have {data.x.shape[1]} dimensions, expected {expected_junction_features}. Terminating.")
+            if data.x.shape[1] != NODE_FEATURES_COUNT:
+                print(f"ERROR: Final node features have {data.x.shape[1]} dimensions, expected {NODE_FEATURES_COUNT}. Terminating.")
                 exit(1)
-            if data.edge_attr.shape[1] != expected_edge_features:
-                print(f"ERROR: Final edge features have {data.edge_attr.shape[1]} dimensions, expected {expected_edge_features}. Terminating.")
+            if data.edge_attr.shape[1] != EDGE_FEATURES_COUNT:
+                print(f"ERROR: Final edge features have {data.edge_attr.shape[1]} dimensions, expected {EDGE_FEATURES_COUNT}. Terminating.")
                 exit(1)
             
             # Save the data object to a .pt file
             out_file = os.path.join(self.out_graph_folder, snap_file.replace(".json", ".pt"))
             torch.save(data, out_file)
-            # print(f"✓ Saved {snap_file.replace('.json', '.pt')} with {data.x.shape[0]} nodes, {data.edge_index.shape[1]} edges")
+            print(f"✅ Saved {snap_file.replace('.json', '.pt')} with {data.x.shape[0]} nodes, {data.edge_index.shape[1]} edges")
+        
+        # Final summary
+        print(f"\n{'='*60}")
+        print(f"🎉 DATASET CREATION COMPLETE")
+        print(f"{'='*60}")
+        print(f"📊 Summary:")
+        print(f"   ✅ Snapshots processed: {total_snapshots_processed}")
+        print(f"   ❌ Snapshots skipped: {total_snapshots_skipped}")
+        print(f"   📈 Success rate: {total_snapshots_processed}/{len(self.snapshot_files)} ({100*total_snapshots_processed/len(self.snapshot_files):.1f}%)")
+        print(f"   📁 Output folder: {self.out_graph_folder}")
+        print(f"{'='*60}")
 
-
-            
-
-            
 
 def main():
     parser = argparse.ArgumentParser(description="Create a traffic dataset from simulation snapshots.")
     parser.add_argument(
         '--config', 
-        default="simulation.config.json", 
+        default="/home/guy/Projects/Traffic/Traffic-DSTG-Gen/simulation.config.json", 
         help="Path to simulation config JSON file."
     )
     
     parser.add_argument(
         "--snapshots_folder",
         type=str,
-        default="/media/guy/StorageVolume/traffic_data",
+        # default="/media/guy/StorageVolume/traffic_data",
+        default="test",
         help="Folder with snapshot JSON files"
     )
     parser.add_argument(
         "--labels_folder",
         type=str,
-        default="/media/guy/StorageVolume/traffic_data/labels",
+        default="test/labels",
+        # default="/media/guy/StorageVolume/traffic_data/labels",
         help="Folder with per-snapshot label JSON files"
     )
     parser.add_argument(
         "--eda_folder",
         type=str,
-        default="eda_exports",
+        default="/home/guy/Projects/Traffic/Traffic-DSTG-Gen/eda_exports",
         help="Folder with labels and feature summary CSVs"
     )
     parser.add_argument(
         "--out_graph_folder",
         type=str,
-        default="/home/guy/Projects/Traffic/traffic_data_pt",
+        # default="/home/guy/Projects/Traffic/traffic_data_pt",
+        default="traffic_data_pt",
         help="Output folder for .pt graph files"
     )
     parser.add_argument(
-    "--filter_outliers",
-    action="store_true",
-    default=True,
-    help="Enable filtering of outliers in ETA labels (default: True)"
+        "--filter_outliers",
+        action="store_true",
+        default=True,
+        help="Enable filtering of outliers in ETA labels (default: True)"
     )
 
     parser.add_argument(
@@ -1572,7 +1690,7 @@ def main():
     parser.add_argument(
         "--mapping_folder",
         type=str,
-        default="eda_exports/mappings",
+        default="/home/guy/Projects/Traffic/Traffic-DSTG-Gen/eda_exports/mappings",
         help="Folder with mappings for vehicle, junction, and edge features (default: eda_exports/mappings)"
     )
     
@@ -1586,7 +1704,7 @@ def main():
     parser.add_argument(
         "--eta_analysis_methods_path",
         type=str,
-        default="eda_exports/eta/eta_analysis_methods.csv",
+        default="/home/guy/Projects/Traffic/Traffic-DSTG-Gen/eda_exports/eta/eta_analysis_methods.csv",
         help="Path to eta_analysis_methods.csv file (default: eda_exports/eta/eta_analysis_methods.csv)"
     )
 
