@@ -210,7 +210,7 @@ class DatasetCreator:
         if ttt_row.empty or '99%' not in ttt_row:
             raise ValueError("Could not find 99th percentile for total_travel_time_seconds in labels_feature_summary.csv")
         self.travel_time_99p = float(ttt_row['99%'].values[0])
-        self.travel_time_min = 180  # 3 minutes in seconds
+        self.travel_time_min = 180.0  # 3 minutes in seconds
 
         # Load thresholds for all four methods from eta_analysis_methods.csv
         if not os.path.exists(self.eta_analysis_methods_path):
@@ -546,48 +546,25 @@ class DatasetCreator:
             print(f"Warning: No 'eta' stats found in {self.label_features_file}. Terminating.")
             exit(1)
         
-        # Initialize counters for detailed logging
-        total_labels = len(label_data)
-        filtered_out_duration = 0
-        filtered_out_missing_data = 0
-        kept_vehicles = 0
-        
-        print(f"\n🔍 Processing labels for {snap_file}:")
-        print(f"   Total labels in file: {total_labels}")
-        print(f"   Duration filter range: {self.travel_time_min}s - {self.travel_time_99p}s")
-        
         filtered_label_map = {}
         filtered_vehicle_ids = set()
         y_cats = {k: [] for k in self.method_key_map.values()}
         binary_threshold = self.eta_binary_threshold
         y_binary = []
-        
         for entry in label_data:
             eta = entry.get('eta')
             vid = entry.get('vehicle_id')
             duration = entry.get('total_travel_time_seconds', 0)
-            
-            # Check for missing data
             if eta is None or vid is None:
-                print(f"   ❌ {vid}: Missing 'eta' or 'vehicle_id' in label entry {entry}")
-                filtered_out_missing_data += 1
-                continue
-            
-            # Check duration filter
+                print(f"Warning: Missing 'eta' or 'vehicle_id' in label entry {entry}. Terminating.")
+                exit(1)
             if not (self.travel_time_min <= duration <= self.travel_time_99p):
-                if duration < self.travel_time_min:
-                    print(f"   ❌ {vid}: Duration {duration:.0f}s < {self.travel_time_min}s (FILTERED - too short)")
-                else:
-                    print(f"   ❌ {vid}: Duration {duration:.0f}s > {self.travel_time_99p}s (FILTERED - too long)")
-                filtered_out_duration += 1
-                continue
-            
-            # Vehicle passed all filters
-            print(f"   ✅ {vid}: Duration {duration:.0f}s, ETA {eta:.0f}s (KEPT)")
-            kept_vehicles += 1
-            
+                continue  # skip out-of-range
             if self.normalize :
-                eta_final = (eta - eta_stats['min']) / (eta_stats['max'] - eta_stats['min'])
+                # Use filtered range for normalization: 180 to 99th percentile (4732)
+                eta_min_filtered = self.travel_time_min
+                eta_max_filtered = self.travel_time_99p  # 4732.0
+                eta_final = (eta - eta_min_filtered) / (eta_max_filtered - eta_min_filtered)
             else:
                 eta_final = eta
             filtered_label_map[vid] = eta_final
@@ -598,23 +575,9 @@ class DatasetCreator:
                 y_cats[short_key].append(self.get_eta_category(eta, th['short'], th['long']))
             # Binary label: 0 if short, 1 if long
             y_binary.append(0 if eta < binary_threshold else 1)
-        
-        # Print summary
-        print(f"\n📊 Label Processing Summary for {snap_file}:")
-        print(f"   ✅ Kept vehicles: {kept_vehicles}")
-        print(f"   ❌ Filtered out (duration): {filtered_out_duration}")
-        print(f"   ❌ Filtered out (missing data): {filtered_out_missing_data}")
-        print(f"   📈 Success rate: {kept_vehicles}/{total_labels} ({100*kept_vehicles/total_labels:.1f}%)")
-        
         if len(filtered_label_map) != len(filtered_vehicle_ids):
             print(f"Warning: Mismatch in filtered_label_map and filtered_vehicle_ids length. {len(filtered_label_map)} vs {len(filtered_vehicle_ids)}")
             exit(1)
-        
-        # Additional validation
-        if kept_vehicles == 0:
-            print(f"⚠️  WARNING: No vehicles passed filtering for {snap_file}")
-        elif kept_vehicles < total_labels * 0.5:  # Less than 50% success rate
-            print(f"⚠️  WARNING: Low filtering success rate for {snap_file} ({100*kept_vehicles/total_labels:.1f}%)")
         filtered_vehicle_ids = sorted(filtered_vehicle_ids, key=extract_numeric_suffix)
         etas = [filtered_label_map[vid] for vid in filtered_vehicle_ids]
         y = torch.FloatTensor(etas)
@@ -715,12 +678,6 @@ class DatasetCreator:
         if len(vehicle_nodes) < len(current_vehicle_ids):
             print(f"ERROR: Snapshot {snap_file} has fewer vehicle nodes ({len(vehicle_nodes)}) than expected ({len(current_vehicle_ids)}). Terminating.")
             exit(1)
-        
-        print(f"🔍 Processing vehicle features for {snap_file}:")
-        print(f"   📊 Total nodes in snapshot: {len(nodes)}")
-        print(f"   🚗 Vehicle nodes in snapshot: {len(vehicle_nodes)}")
-        print(f"   🎯 Expected vehicles (from labels): {len(current_vehicle_ids)}")
-        print(f"   ✅ Vehicle coverage: {len(current_vehicle_ids)}/{len(vehicle_nodes)} ({100*len(current_vehicle_ids)/len(vehicle_nodes):.1f}%)")
         #sort vehicle nodes by their IDs to ensure consistent order
         vehicle_nodes = sorted(vehicle_nodes, key=lambda x: extract_numeric_suffix(x.get('id', '')))
         features = []
@@ -802,15 +759,15 @@ class DatasetCreator:
                 print(f"ERROR: Vehicle {vid} has no route_length defined. Terminating.")
                 exit(1)
             if self.normalize: # use min-max normalization instead of z-score
-                route_length = (route_length - vehicle_stats['route_length']['min']) / (vehicle_stats['route_length']['max'] - vehicle_stats['route_length']['min'])
-            feature.append(route_length) # [10]
+                route_length_norm = (route_length - vehicle_stats['route_length']['min']) / (vehicle_stats['route_length']['max'] - vehicle_stats['route_length']['min'])
+            feature.append(route_length_norm) # [10]
             # progress (1 - route_length_left / route_length)
             route_length_left = vehicle_node.get('route_length_left', None)
             if route_length_left is None:
                 print(f"ERROR: Vehicle {vid} has no route_length_left defined. Terminating.")
                 exit(1)
             if route_length == 0:
-                print(f"ERROR: Vehicle {vid} has no route_length defined. Terminating.")
+                print(f"ERROR: Vehicle {vid} has no route_length defined but has route left. Terminating.")
                 exit(1)
             else:
                 progress = 1.0 - (route_length_left / route_length)
@@ -1473,24 +1430,13 @@ class DatasetCreator:
         print(f"✓ Edge features validated: {len(static_edge_features)} edges with {EDGE_FEATURES_COUNT} features each")
         
         print(f"Converting {len(self.snapshot_files)} snapshots to PyG Data objects...")
-        total_snapshots_processed = 0
-        total_snapshots_skipped = 0
-        
         for snap_file in tqdm(self.snapshot_files, desc="Processing snapshots"):
-            print(f"\n{'='*60}")
-            print(f"Processing snapshot: {snap_file}")
-            print(f"{'='*60}")
-            
             y_tensor, current_vehicle_ids, y_cat_tensors, y_binary_tensor = self.process_labels(snap_file)
             
             # Skip if no vehicles in this snapshot
             if len(current_vehicle_ids) == 0:
-                print(f"⚠️  WARNING: Snapshot {snap_file} has no vehicles after filtering. Skipping.")
-                total_snapshots_skipped += 1
+                print(f"WARNING: Snapshot {snap_file} has no vehicles. Skipping.")
                 continue
-            
-            print(f"✅ Proceeding with {len(current_vehicle_ids)} vehicles for snapshot {snap_file}")
-            total_snapshots_processed += 1
                 
             snapshot_data, vehicle_features, vehicle_routes_flat, vehicle_route_splits, current_vehicle_current_edges, current_vehicle_position_on_edges  = self.process_vehicle_features(snap_file, current_vehicle_ids, static_edge_ids_to_index, static_edge_features)
             
@@ -1617,18 +1563,7 @@ class DatasetCreator:
             # Save the data object to a .pt file
             out_file = os.path.join(self.out_graph_folder, snap_file.replace(".json", ".pt"))
             torch.save(data, out_file)
-            print(f"✅ Saved {snap_file.replace('.json', '.pt')} with {data.x.shape[0]} nodes, {data.edge_index.shape[1]} edges")
-        
-        # Final summary
-        print(f"\n{'='*60}")
-        print(f"🎉 DATASET CREATION COMPLETE")
-        print(f"{'='*60}")
-        print(f"📊 Summary:")
-        print(f"   ✅ Snapshots processed: {total_snapshots_processed}")
-        print(f"   ❌ Snapshots skipped: {total_snapshots_skipped}")
-        print(f"   📈 Success rate: {total_snapshots_processed}/{len(self.snapshot_files)} ({100*total_snapshots_processed/len(self.snapshot_files):.1f}%)")
-        print(f"   📁 Output folder: {self.out_graph_folder}")
-        print(f"{'='*60}")
+            # print(f"✓ Saved {snap_file.replace('.json', '.pt')} with {data.x.shape[0]} nodes, {data.edge_index.shape[1]} edges")
 
 
 def main():
@@ -1642,15 +1577,13 @@ def main():
     parser.add_argument(
         "--snapshots_folder",
         type=str,
-        # default="/media/guy/StorageVolume/traffic_data",
-        default="test",
+        default="/media/guy/StorageVolume/traffic_data",
         help="Folder with snapshot JSON files"
     )
     parser.add_argument(
         "--labels_folder",
         type=str,
-        default="test/labels",
-        # default="/media/guy/StorageVolume/traffic_data/labels",
+        default="/media/guy/StorageVolume/traffic_data/labels",
         help="Folder with per-snapshot label JSON files"
     )
     parser.add_argument(
@@ -1662,8 +1595,7 @@ def main():
     parser.add_argument(
         "--out_graph_folder",
         type=str,
-        # default="/home/guy/Projects/Traffic/traffic_data_pt",
-        default="traffic_data_pt",
+        default="/home/guy/Projects/Traffic/traffic_data_pt",
         help="Output folder for .pt graph files"
     )
     parser.add_argument(
