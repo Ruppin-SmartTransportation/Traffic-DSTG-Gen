@@ -12,12 +12,12 @@ def parse_args():
     parser.add_argument('--config', default="simulation.config.json", help="Path to simulation config JSON file.")
     parser.add_argument('--net', default="simulation/urban_three_zones.net.xml", help="Path to SUMO network file (.net.xml).")
     parser.add_argument('--sumocfg', default="simulation/urban_three_zones.sumocfg", help="Path to SUMO config file (.sumocfg).")
-    parser.add_argument('--sumo-gui', action='store_false', help="Use SUMO GUI (default: True, use CLI)")
+    parser.add_argument('--sumo', action='store_false', help="Use SUMO GUI (default: False, use GUI)")
     return parser.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
-    sumo_binary = "sumo-gui" if args.sumo_gui else "sumo"
+    sumo_binary = "sumo" if args.sumo else "sumo-gui"
     print(f"Using SUMO binary: {sumo_binary}")
     # Load config
     with open(args.config) as f:
@@ -28,7 +28,7 @@ if __name__ == "__main__":
     snapshot_dir = config.get("snapshot_dir", "traffic_data")
     if not snapshot_dir:
         snapshot_dir = "traffic_data"
-    mapping_dir = "eda_export/mappings"
+    mapping_dir = "eda_exports/mappings"
     labels_file = os.path.join(snapshot_dir, "labels.json")
     snapshot_interval = config.get("snapshot_interval_sec", 60)
     # Initialize and load simulation
