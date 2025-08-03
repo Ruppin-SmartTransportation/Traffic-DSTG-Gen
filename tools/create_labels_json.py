@@ -2,6 +2,7 @@ import os
 import json
 from tqdm import tqdm
 import argparse
+import sys
 
 def create_snapshot_labels(
     snapshots_folder,
@@ -24,10 +25,25 @@ def create_snapshot_labels(
         f for f in os.listdir(snapshots_folder)
         if f.endswith(".json") and "labels" not in f
     ]
+    
+    error_files = []
+    processed_count = 0
+    
     for snap_file in tqdm(snapshot_files, desc="Creating GT labels per snapshot"):
         snap_path = os.path.join(snapshots_folder, snap_file)
-        with open(snap_path, "r") as f:
-            snap = json.load(f)
+        
+        try:
+            with open(snap_path, "r") as f:
+                snap = json.load(f)
+        except (OSError, IOError, json.JSONDecodeError) as e:
+            print(f"\nError reading file {snap_file}: {e}")
+            error_files.append(snap_file)
+            continue
+        except Exception as e:
+            print(f"\nUnexpected error reading file {snap_file}: {e}")
+            error_files.append(snap_file)
+            continue
+            
         # Get snapshot time in seconds from the JSON content
         snap_time = snap.get("step")
 
@@ -88,11 +104,28 @@ def create_snapshot_labels(
                     "total_travel_time_seconds": matching_gt["total_travel_time_seconds"],
                     "eta": eta
                 })
-        out_name = snap_file.replace("step_", "labels_")
-        out_path = os.path.join(output_labels_folder, out_name)
-        with open(out_path, "w") as f:
-            json.dump(labels, f, indent=2)
-    print(f"Done! Snapshot label files written to {output_labels_folder}")
+        
+        try:
+            out_name = snap_file.replace("step_", "labels_")
+            out_path = os.path.join(output_labels_folder, out_name)
+            with open(out_path, "w") as f:
+                json.dump(labels, f, indent=2)
+            processed_count += 1
+        except (OSError, IOError) as e:
+            print(f"\nError writing file {out_name}: {e}")
+            error_files.append(snap_file)
+            continue
+    
+    print(f"\nDone! Processed {processed_count} files successfully.")
+    if error_files:
+        print(f"Failed to process {len(error_files)} files:")
+        for error_file in error_files[:10]:  # Show first 10 errors
+            print(f"  - {error_file}")
+        if len(error_files) > 10:
+            print(f"  ... and {len(error_files) - 10} more files")
+        print(f"Snapshot label files written to {output_labels_folder}")
+    else:
+        print(f"All files processed successfully! Snapshot label files written to {output_labels_folder}")
 
 def main():
     parser = argparse.ArgumentParser(description="Generate per-snapshot ETA ground truth label files")

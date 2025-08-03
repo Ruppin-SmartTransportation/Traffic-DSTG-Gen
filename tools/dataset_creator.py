@@ -526,19 +526,27 @@ class DatasetCreator:
         Processes label data into a map and filters out vehicle IDs based on ETA outliers.
 
         Args:
-            label_list (list): List of label dictionaries from a single snapshot.
-            stats (dict): Parsed stats including 'labels' from labels_feature_summary.csv.
-            normalize_labels (bool): If True, apply z-score normalization to ETA.
-            filter_outliers (bool): If True, remove labels with |z-score| > 3.
+            snap_file (str): Snapshot filename to process.
 
         Returns:
-            label_map (dict): {vehicle_id: eta_value}
-            valid_vehicle_ids (set): Set of vehicle IDs to keep
+            tuple: (y_tensor, filtered_vehicle_ids, y_cat_tensors, y_binary_tensor)
         """
         label_file = snap_file.replace("step_", "labels_")
         label_path = os.path.join(self.labels_folder, label_file)
-        with open(label_path, 'r') as f:
+        
+        # Check if label file exists
+        if not os.path.exists(label_path):
+            print(f"Warning: Label file {label_file} not found. Skipping snapshot {snap_file}.")
+            # Return empty tensors and lists to indicate no data
+            return torch.FloatTensor([]), [], {}, torch.LongTensor([])
+        
+        try:
+            with open(label_path, 'r') as f:
                 label_data = json.load(f)
+        except (OSError, IOError, json.JSONDecodeError) as e:
+            print(f"Error reading label file {label_file}: {e}. Skipping snapshot {snap_file}.")
+            # Return empty tensors and lists to indicate no data
+            return torch.FloatTensor([]), [], {}, torch.LongTensor([])
 
         label_stats = self.entities_data['label']['stats']
         eta_stats = label_stats.get("eta", {})
@@ -560,6 +568,10 @@ class DatasetCreator:
                 exit(1)
             if not (self.travel_time_min <= duration <= self.travel_time_99p):
                 continue  # skip out-of-range
+            eta -= 1
+            if eta > duration:
+                print(f"label {label_file}  has eta {eta} and duration {duration}")
+                exit(1)  # vehicles where ETA > duration (logical error)
             if self.normalize :
                 # Use filtered range for normalization: 180 to 99th percentile (4732)
                 eta_min_filtered = self.travel_time_min
@@ -953,7 +965,6 @@ class DatasetCreator:
                 current_avg_speed = (current_avg_speed - self.entities_data['edge']['stats']['avg_speed']['min']) / (self.entities_data['edge']['stats']['avg_speed']['max'] - self.entities_data['edge']['stats']['avg_speed']['min'])
                 
             updated_features[0] = current_avg_speed  # Update avg_speed in the features
-
             # Calculate edge_demand based on the edge_demand_map (future demand from remaining routes)
             edge_demand = edge_demand_map.get(edge_id, -1)
             if edge_demand <= -1:
@@ -1430,12 +1441,14 @@ class DatasetCreator:
         print(f"✓ Edge features validated: {len(static_edge_features)} edges with {EDGE_FEATURES_COUNT} features each")
         
         print(f"Converting {len(self.snapshot_files)} snapshots to PyG Data objects...")
+        skipped_count = 0
         for snap_file in tqdm(self.snapshot_files, desc="Processing snapshots"):
             y_tensor, current_vehicle_ids, y_cat_tensors, y_binary_tensor = self.process_labels(snap_file)
             
-            # Skip if no vehicles in this snapshot
+            # Skip if no vehicles in this snapshot or if label file was missing/corrupted
             if len(current_vehicle_ids) == 0:
-                print(f"WARNING: Snapshot {snap_file} has no vehicles. Skipping.")
+                print(f"WARNING: Snapshot {snap_file} has no vehicles or missing label file. Skipping.")
+                skipped_count += 1
                 continue
                 
             snapshot_data, vehicle_features, vehicle_routes_flat, vehicle_route_splits, current_vehicle_current_edges, current_vehicle_position_on_edges  = self.process_vehicle_features(snap_file, current_vehicle_ids, static_edge_ids_to_index, static_edge_features)
@@ -1564,6 +1577,16 @@ class DatasetCreator:
             out_file = os.path.join(self.out_graph_folder, snap_file.replace(".json", ".pt"))
             torch.save(data, out_file)
             # print(f"✓ Saved {snap_file.replace('.json', '.pt')} with {data.x.shape[0]} nodes, {data.edge_index.shape[1]} edges")
+        
+        # Print summary of processing
+        total_files = len(self.snapshot_files)
+        processed_files = total_files - skipped_count
+        print(f"\n✅ Dataset creation completed!")
+        print(f"📊 Summary:")
+        print(f"   - Total snapshot files: {total_files}")
+        print(f"   - Successfully processed: {processed_files}")
+        print(f"   - Skipped (missing/corrupted labels): {skipped_count}")
+        print(f"   - Success rate: {(processed_files/total_files)*100:.2f}%")
 
 
 def main():
