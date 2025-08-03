@@ -568,15 +568,20 @@ class DatasetCreator:
                 exit(1)
             if not (self.travel_time_min <= duration <= self.travel_time_99p):
                 continue  # skip out-of-range
-            eta -= 1
-            if eta > duration:
-                print(f"label {label_file}  has eta {eta} and duration {duration}")
-                exit(1)  # vehicles where ETA > duration (logical error)
+            if eta == duration + 1:# adjust for sumo simulation offset
+                eta = eta - 1
+            
+            if eta < 0:
+                print(f"Warning: eta {eta} is less than 0. Terminating.")
+                exit(1)
+            if eta > self.travel_time_99p:
+                print(f"Warning: eta {eta} is greater than 99th percentile {self.travel_time_99p}. Terminating.")
+                exit(1)
+                
             if self.normalize :
-                # Use filtered range for normalization: 180 to 99th percentile (4732)
-                eta_min_filtered = self.travel_time_min
-                eta_max_filtered = self.travel_time_99p  # 4732.0
-                eta_final = (eta - eta_min_filtered) / (eta_max_filtered - eta_min_filtered)
+                # Use filtered range for normalization:  0 to 199th percentile
+                eta_max_filtered = self.travel_time_99p  
+                eta_final = eta / eta_max_filtered
             else:
                 eta_final = eta
             filtered_label_map[vid] = eta_final
