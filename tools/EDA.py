@@ -397,14 +397,23 @@ def summarize_labels(labels_folder, export_folder="./eda_exports", entity_type=N
                 "num_missing": sum(pd.isna(vals_clean)),
                 "num_unique": pd.Series(vals_clean).nunique()
             }
-        else:
+        elif feat == 'vehicle_id':
             summary = {
                 "feature": feat,
                 "type": "categorical",
                 "count": len(vals_clean),
                 "num_missing": sum(pd.isna(vals_clean)),
                 "num_unique": len(set(vals_clean)),
-                "keys": sorted(set([v for v in vals_clean if v not in [None, '', 'None', np.nan]]))
+                "keys":None
+            }
+        else:
+            summary = {
+            "feature": feat,
+            "type": "categorical",
+            "count": len(vals_clean),
+            "num_missing": sum(pd.isna(vals_clean)),
+            "num_unique": len(set(vals_clean)),
+            "keys": sorted(set([v for v in vals_clean if v not in [None, '', 'None', np.nan]]))
             }
         rows.append(summary)
 
