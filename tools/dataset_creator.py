@@ -597,6 +597,11 @@ class DatasetCreator:
             exit(1)
         filtered_vehicle_ids = sorted(filtered_vehicle_ids, key=extract_numeric_suffix)
         etas = [filtered_label_map[vid] for vid in filtered_vehicle_ids]
+        #print min and max of etas
+        if len(etas) == 0:
+            print("Warning: No valid ETAs found in label data. Returning empty tensors.")
+            return torch.FloatTensor([]), [], {}, torch.LongTensor([])
+        print(f"Processed {len(etas)} valid ETAs with min: {min(etas)}, max: {max(etas)}")
         y = torch.FloatTensor(etas)
         # Convert y_cats to tensors and validate
         y_cat_tensors = {}
