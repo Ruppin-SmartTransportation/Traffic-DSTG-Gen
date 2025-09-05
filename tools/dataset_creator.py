@@ -116,28 +116,26 @@ def extract_numeric_suffix(s):
 
 # Global variable for node feature names (order matters, j_type is last)
 NODE_FEATURE_NAMES = [
-    'node_type', # 0
-    'veh_type_oh_0', 'veh_type_oh_1', 'veh_type_oh_2', # 1-3
-    'speed', # 4
-    'acceleration', # 5
-    'sin_hour', # 6
-    'cos_hour', # 7
-    'sin_day', # 8
-    'cos_day', # 9
-    'route_length', # 10
-    'progress', # 11
-    'zone_oh_0', 'zone_oh_1', 'zone_oh_2', 'zone_oh_3', # 12-15
-    'current_x', # 16
-    'current_y', # 17
-    'destination_x', # 18
-    'destination_y', # 19
-    'current_edge_num_lanes_oh_0', 'current_edge_num_lanes_oh_1', 'current_edge_num_lanes_oh_2', # 20-22
-    'current_edge_demand', # 23
-    'current_edge_occupancy',
-    'j_type'  # Always last
+    'node_type',                         # 0
+    'veh_type_oh_0','veh_type_oh_1','veh_type_oh_2',  # 1-3
+    'speed',                             # 4
+    'acceleration',                      # 5
+    'sin_hour','cos_hour',               # 6-7
+    'sin_day','cos_day',                 # 8-9
+    'route_length',                      # 10
+    'progress',                          # 11
+    'zone_oh_0','zone_oh_1','zone_oh_2','zone_oh_3',  # 12-15
+    'current_x','current_y',             # 16-17
+    'destination_x','destination_y',     # 18-19
+    'current_edge_num_lanes_oh_0','current_edge_num_lanes_oh_1','current_edge_num_lanes_oh_2',  # 20-22
+    'current_edge_demand',               # 23
+    'current_edge_occupancy',            # 24
+    'route_left_demand_len_disc',        # 25   
+    'route_left_occupancy_len_disc',     # 26   
+    'j_type'                             # 27   (last; 0 for vehicles)
 ]
-
-NODE_FEATURES_COUNT = len(NODE_FEATURE_NAMES)
+NODE_FEATURES_COUNT = len(NODE_FEATURE_NAMES)  # 28
+BASE_FEATURES_COUNT = 26  
 EDGE_FEATURES_COUNT = 7
 # Global variable for edge feature names (order matters)
 EDGE_FEATURE_NAMES = [
@@ -207,10 +205,11 @@ class DatasetCreator:
         label_summary_path = os.path.join(self.eda_dir, "labels_feature_summary.csv")
         label_summary_df = pd.read_csv(label_summary_path)
         ttt_row = label_summary_df[label_summary_df['feature'] == 'total_travel_time_seconds']
-        if ttt_row.empty or '99%' not in ttt_row:
+        if ttt_row.empty or '98%' not in ttt_row:
             raise ValueError("Could not find 99th percentile for total_travel_time_seconds in labels_feature_summary.csv")
-        self.travel_time_99p = float(ttt_row['99%'].values[0])
+        self.travel_time_98p = float(ttt_row['98%'].values[0])
         self.travel_time_min = 180.0  # 3 minutes in seconds
+        print(f"Using travel_time_98p: {self.travel_time_98p}, travel_time_min: {self.travel_time_min}")
 
         # Load thresholds for all four methods from eta_analysis_methods.csv
         if not os.path.exists(self.eta_analysis_methods_path):
@@ -303,6 +302,10 @@ class DatasetCreator:
                         percentile_name = f'{p}%'
                         if percentile_name in row:
                             entry[percentile_name] = float(row[percentile_name])
+                    if feature_name == 'eta':
+                        # 👉 Extra stats for ETA in log space
+                        entry['log_mean'] = float(row.get('log_mean', 0.0))
+                        entry['log_std'] = float(row.get('log_std', 1.0))
 
                 # Handle categorical features
                 elif row['type'] == 'categorical':
@@ -523,97 +526,131 @@ class DatasetCreator:
 
     def process_labels(self, snap_file):
         """
-        Processes label data into a map and filters out vehicle IDs based on ETA outliers.
-
-        Args:
-            snap_file (str): Snapshot filename to process.
+        Build multiple label variants for flexibility:
+        - 'raw': raw ETA in seconds
+        - 'minmax': eta / p98  (clipped to p98)
+        - 'z': (eta - mean) / std
+        - 'log': log1p(eta)
+        - 'log_z': (log1p(eta) - log_mean) / log_std
 
         Returns:
-            tuple: (y_tensor, filtered_vehicle_ids, y_cat_tensors, y_binary_tensor)
+        y_dict: Dict[str, torch.FloatTensor] of shape [num_vehicles]
+        filtered_vehicle_ids: List[str]
+        y_cat_tensors: Dict[str, LongTensor] categorical labels (per your thresholds)
+        y_binary_tensor: LongTensor (0 short, 1 long) from raw eta
         """
+        import math
         label_file = snap_file.replace("step_", "labels_")
         label_path = os.path.join(self.labels_folder, label_file)
-        
-        # Check if label file exists
         if not os.path.exists(label_path):
-            print(f"Warning: Label file {label_file} not found. Skipping snapshot {snap_file}.")
-            # Return empty tensors and lists to indicate no data
-            return torch.FloatTensor([]), [], {}, torch.LongTensor([])
-        
-        try:
-            with open(label_path, 'r') as f:
-                label_data = json.load(f)
-        except (OSError, IOError, json.JSONDecodeError) as e:
-            print(f"Error reading label file {label_file}: {e}. Skipping snapshot {snap_file}.")
-            # Return empty tensors and lists to indicate no data
+            print(f"[process_labels] Missing label file {label_file}. Skipping {snap_file}.")
             return torch.FloatTensor([]), [], {}, torch.LongTensor([])
 
-        label_stats = self.entities_data['label']['stats']
-        eta_stats = label_stats.get("eta", {})
-        if not eta_stats:
-            print(f"Warning: No 'eta' stats found in {self.label_features_file}. Terminating.")
-            exit(1)
-        
+        try:
+            with open(label_path, "r") as f:
+                label_data = json.load(f)
+        except Exception as e:
+            print(f"[process_labels] Error reading {label_file}: {e}. Skipping {snap_file}.")
+            return torch.FloatTensor([]), [], {}, torch.LongTensor([])
+
+        eta_stats = self.entities_data.get('label', {}).get('stats', {}).get('eta', {})
+        required_keys = ["min", "max", "98%", "mean", "std", "log_mean", "log_std"]
+        if not all(k in eta_stats for k in required_keys):
+            raise ValueError(
+                f"[process_labels] Missing eta stats keys. Have {list(eta_stats.keys())}, "
+                f"need {required_keys}. Stats must be computed on TRAIN split only."
+            )
+        p98 = float(eta_stats["98%"])
+        mean = float(eta_stats["mean"])
+        std  = float(eta_stats["std"]) if eta_stats["std"] > 0 else 1.0
+        log_mean = float(eta_stats["log_mean"])
+        log_std  = float(eta_stats["log_std"]) if eta_stats["log_std"] > 0 else 1.0
+
         filtered_label_map = {}
         filtered_vehicle_ids = set()
         y_cats = {k: [] for k in self.method_key_map.values()}
-        binary_threshold = self.eta_binary_threshold
         y_binary = []
+
         for entry in label_data:
-            eta = entry.get('eta')
-            vid = entry.get('vehicle_id')
-            duration = entry.get('total_travel_time_seconds', 0)
+            eta = entry.get("eta")
+            vid = entry.get("vehicle_id")
+            duration = entry.get("total_travel_time_seconds", 0)
+
             if eta is None or vid is None:
-                print(f"Warning: Missing 'eta' or 'vehicle_id' in label entry {entry}. Terminating.")
-                exit(1)
-            if not (self.travel_time_min <= duration <= self.travel_time_99p):
-                continue  # skip out-of-range
-            if eta == duration + 1:# adjust for sumo simulation offset
+                raise ValueError(f"[process_labels] Missing 'eta' or 'vehicle_id' in {entry}")
+
+            # keep trip duration filter as you had it
+            if not (self.travel_time_min <= duration <= self.travel_time_98p):
+                continue
+
+            # SUMO off-by-one fix
+            if eta == duration + 1:
                 eta = eta - 1
-            
+
             if eta < 0:
-                print(f"Warning: eta {eta} is less than 0. Terminating.")
-                exit(1)
-            if eta > self.travel_time_99p:
-                print(f"Warning: eta {eta} is greater than 99th percentile {self.travel_time_99p}. Terminating.")
-                exit(1)
-                
-            if self.normalize :
-                # Use filtered range for normalization:  0 to 199th percentile
-                eta_max_filtered = self.travel_time_99p  
-                eta_final = eta / eta_max_filtered
-            else:
-                eta_final = eta
-            filtered_label_map[vid] = eta_final
+                raise ValueError(f"[process_labels] eta {eta} < 0")
+            if eta > self.travel_time_98p:
+                raise ValueError(f"[process_labels] eta {eta} > 99th percentile {self.travel_time_98p}")
+
+            filtered_label_map[vid] = float(eta)
             filtered_vehicle_ids.add(vid)
-            # Compute all label categories for this vehicle
+
+            # categorical/binary labels ALWAYS from raw seconds
             for verbose, short_key in self.method_key_map.items():
                 th = self.method_thresholds[verbose]
                 y_cats[short_key].append(self.get_eta_category(eta, th['short'], th['long']))
-            # Binary label: 0 if short, 1 if long
+
+            binary_threshold = self.eta_binary_threshold
             y_binary.append(0 if eta < binary_threshold else 1)
-        if len(filtered_label_map) != len(filtered_vehicle_ids):
-            print(f"Warning: Mismatch in filtered_label_map and filtered_vehicle_ids length. {len(filtered_label_map)} vs {len(filtered_vehicle_ids)}")
-            exit(1)
-        filtered_vehicle_ids = sorted(filtered_vehicle_ids, key=extract_numeric_suffix)
-        etas = [filtered_label_map[vid] for vid in filtered_vehicle_ids]
-        #print min and max of etas
-        if len(etas) == 0:
-            print("Warning: No valid ETAs found in label data. Returning empty tensors.")
+
+        if not filtered_vehicle_ids:
+            print("[process_labels] No valid ETAs after filtering.")
             return torch.FloatTensor([]), [], {}, torch.LongTensor([])
-        print(f"Processed {len(etas)} valid ETAs with min: {min(etas)}, max: {max(etas)}")
-        y = torch.FloatTensor(etas)
-        # Convert y_cats to tensors and validate
+
+        # consistent ordering
+        filtered_vehicle_ids = sorted(filtered_vehicle_ids, key=extract_numeric_suffix)
+        etas_raw = [filtered_label_map[vid] for vid in filtered_vehicle_ids]
+
+        # Build all target variants
+        etas_np = np.array(etas_raw, dtype=np.float32)
+        etas_log = np.log1p(etas_np)
+
+        # min–max via p98 cap (robust)
+        etas_mm = np.clip(etas_np, 0.0, p98) / (p98 if p98 > 0 else 1.0)
+
+        # z-score on raw seconds
+        etas_z = (etas_np - mean) / (std if std > 0 else 1.0)
+
+        # log and log z-score
+        etas_log_z = (etas_log - log_mean) / (log_std if log_std > 0 else 1.0)
+
+        # pack tensors
+        y_dict = {
+            "raw":       torch.from_numpy(etas_np.copy()),
+            "minmax":    torch.from_numpy(etas_mm),
+            "z":         torch.from_numpy(etas_z),
+            "log":       torch.from_numpy(etas_log),
+            "log_z":     torch.from_numpy(etas_log_z),
+        }
+
+        # convert cat/binary
         y_cat_tensors = {}
         for k, v in y_cats.items():
-            t = torch.LongTensor([v[i] for i, vid in enumerate(filtered_vehicle_ids)]) if len(v) == len(filtered_vehicle_ids) else torch.LongTensor(v)
-            if len(t) != len(filtered_vehicle_ids):
-                raise ValueError(f"Mismatch: y_{k} ({len(t)}) vs filtered_vehicle_ids ({len(filtered_vehicle_ids)})")
-            y_cat_tensors[k] = t
+            if len(v) != len(filtered_vehicle_ids):
+                raise ValueError(f"[process_labels] Mismatch: y_{k} ({len(v)}) vs ids ({len(filtered_vehicle_ids)})")
+            y_cat_tensors[k] = torch.LongTensor(v)
+
         y_binary_tensor = torch.LongTensor(y_binary)
         if len(y_binary_tensor) != len(filtered_vehicle_ids):
-            raise ValueError(f"Mismatch: y_binary ({len(y_binary_tensor)}) vs filtered_vehicle_ids ({len(filtered_vehicle_ids)})")
-        return y, filtered_vehicle_ids, y_cat_tensors, y_binary_tensor
+            raise ValueError(f"[process_labels] Mismatch: y_binary ({len(y_binary_tensor)}) vs ids ({len(filtered_vehicle_ids)})")
+
+        # compact summary
+        # mm = (float(np.min(etas_np)), float(np.max(etas_np)))
+        # print(f"[process_labels] {len(etas_np)} ETAs (raw sec) min/max: {mm[0]:.1f}/{mm[1]:.1f}; "
+        #     f"p98={p98:.1f}; log_mean/std={log_mean:.3f}/{log_std:.3f}")
+
+        return y_dict, filtered_vehicle_ids, y_cat_tensors, y_binary_tensor
+
 
     def process_vehicle_features(self, snap_file, current_vehicle_ids, static_edge_ids_to_index, static_edge_features):
         """
@@ -780,9 +817,12 @@ class DatasetCreator:
             if route_length is None:
                 print(f"ERROR: Vehicle {vid} has no route_length defined. Terminating.")
                 exit(1)
-            if self.normalize: # use min-max normalization instead of z-score
-                route_length_norm = (route_length - vehicle_stats['route_length']['min']) / (vehicle_stats['route_length']['max'] - vehicle_stats['route_length']['min'])
-            feature.append(route_length_norm) # [10]
+            route_length_norm = route_length
+            if self.normalize:
+                route_length_norm = (route_length - vehicle_stats['route_length']['min']) / \
+                                    max(1e-8, (vehicle_stats['route_length']['max'] - vehicle_stats['route_length']['min']))
+            feature.append(route_length_norm)  # [10]
+
             # progress (1 - route_length_left / route_length)
             route_length_left = vehicle_node.get('route_length_left', None)
             if route_length_left is None:
@@ -856,10 +896,13 @@ class DatasetCreator:
             num_lanes_oh = [0] * len(num_lanes_keys)
             num_lanes_index = num_lanes_keys.index(num_lanes)
             num_lanes_oh[num_lanes_index] = 1
-            feature.extend(num_lanes_oh)  # [21-22] 
-            feature.append(0.0)  # current_edge_demand placeholder [23]
-            feature.append(0.0)  # current_edge_occupancy placeholder [24]
-            feature.append(0)    # j_type (index 25, always 0 for vehicles)
+            feature.extend(num_lanes_oh)  # [20-22] 
+            feature.append(0.0)  # current_edge_demand        [23]
+            feature.append(0.0)  # current_edge_occupancy     [24]
+            feature.append(0.0)  # route_left_demand_len_disc [25]
+            feature.append(0.0)  # route_left_occup_len_disc  [26]
+            feature.append(0)    # j_type                     [27]
+
             # Add the feature vector to the list
             features.append(feature)
 
@@ -883,27 +926,32 @@ class DatasetCreator:
                 exit(1)
             current_edges.append(current_edge_idx)
 
-            # 4. position on edge
-            position_on_edge = float(vehicle_node.get("current_position", -1))
-            static_edge_features = self.entities_data['edge']['features'][current_edge_str]
-            edge_length = static_edge_features.get('length', -1.0)
-            if edge_length == -1.0:
-                print(f"ERROR: Edge {static_edge_features} has no length defined. Terminating.")
-                exit(1)
-            if edge_length <= 0:
-                print(f"ERROR: Edge {static_edge_features} has non-positive length {edge_length}. Terminating.")
-                exit(1)
-            if position_on_edge == -1:
+            # 4) position on edge  -> always store as fraction in [0,1]
+            pos_m = vehicle_node.get("current_position", None)
+            if pos_m is None:
                 print(f"ERROR: Vehicle {vid} has no current_position defined. Terminating.")
                 exit(1)
-            if self.normalize: # use min-max normalization instead of z-score
-                # Get the static features for this edge
-                position_on_edge = position_on_edge / edge_length  # Normalize position on edge
-            if position_on_edge < 0 or position_on_edge > 1:
-                print(f"ERROR: Position on edge for vehicle {vid} is out of bounds: {position_on_edge}. Terminating.")
+
+            edge_info = self.entities_data['edge']['features'].get(current_edge_str)
+            if edge_info is None:
+                print(f"ERROR: Current edge {current_edge_str} not found in edge features map. Terminating.")
                 exit(1)
-        
-            position_on_edges.append(position_on_edge)
+
+            edge_len_m = float(edge_info.get('length', -1.0))
+            if not isinstance(pos_m, (int, float)):
+                print(f"ERROR: current_position for vehicle {vid} is not numeric: {pos_m}. Terminating.")
+                exit(1)
+            if edge_len_m <= 0:
+                print(f"ERROR: Edge {current_edge_str} has non-positive length {edge_len_m}. Terminating.")
+                exit(1)
+
+            pos_m = float(pos_m)
+            pos_frac = pos_m / max(1e-8, edge_len_m)   # convert meters -> fraction
+            # clamp to [0,1] to absorb minor sim drift
+            pos_frac = 0.0 if pos_frac < 0.0 else (1.0 if pos_frac > 1.0 else pos_frac)
+
+            position_on_edges.append(pos_frac)
+
             
         return snapshot_data, features, vehicle_routes_flat, vehicle_route_splits, current_edges, position_on_edges
 
@@ -981,23 +1029,35 @@ class DatasetCreator:
                 print(f"ERROR: Edge {edge_id} not found in edge demand map. Terminating.")
                 exit(1)
             if self.log_normalize:
-                edge_demand = math.log1p(edge_demand) - self.entities_data['edge']['stats']['edge_route_count_log']['mean'] / self.entities_data['edge']['stats']['edge_route_count_log']['std']
+                mu = self.entities_data['edge']['stats']['edge_route_count_log']['mean']
+                sd = max(1e-8, self.entities_data['edge']['stats']['edge_route_count_log']['std'])
+                edge_demand = (math.log1p(edge_demand) - mu) / sd
             elif self.normalize:
-                edge_demand = (edge_demand - self.entities_data['edge']['stats']['edge_route_count']['mean']) / self.entities_data['edge']['stats']['edge_route_count']['std']
+                # If "normalize" is meant to be min-max (per your docstring), use min-max; if z-score, rename the flag.
+                mn = self.entities_data['edge']['stats']['edge_route_count']['min']
+                mx = self.entities_data['edge']['stats']['edge_route_count']['max']
+                edge_demand = (edge_demand - mn) / max(1e-8, (mx - mn))
             else:
                 edge_demand = edge_demand
             updated_features[5] = edge_demand  # Update edge_demand in the features
             
-            # Calculate edge_occupancy based on number of vehicles currently on the edge
+            # occupancy = number of vehicles currently on the edge
             vehicles_on_road = edge.get('vehicles_on_road', [])
             number_of_vehicles_on_road = len(vehicles_on_road)
+
             if self.log_normalize:
-                edge_occupancy = math.log1p(number_of_vehicles_on_road) -self.entities_data['edge']['stats']['vehicles_on_road_count_log']['mean']/ self.entities_data['edge']['stats']['vehicles_on_road_count_log']['std']
+                mu = self.entities_data['edge']['stats']['vehicles_on_road_count_log']['mean']
+                sd = max(1e-8, self.entities_data['edge']['stats']['vehicles_on_road_count_log']['std'])
+                edge_occupancy = (math.log1p(number_of_vehicles_on_road) - mu) / sd
             elif self.normalize:
-                edge_occupancy = (number_of_vehicles_on_road - self.entities_data['edge']['stats']['vehicles_on_road_count']['mean']) / self.entities_data['edge']['stats']['vehicles_on_road_count']['std']
+                mn = self.entities_data['edge']['stats']['vehicles_on_road_count']['min']
+                mx = self.entities_data['edge']['stats']['vehicles_on_road_count']['max']
+                edge_occupancy = (number_of_vehicles_on_road - mn) / max(1e-8, (mx - mn))
             else:
-                edge_occupancy = number_of_vehicles_on_road
-            updated_features[6] = edge_occupancy  # Update edge_occupancy in the features
+                edge_occupancy = float(number_of_vehicles_on_road)
+
+            updated_features[6] = edge_occupancy
+
             updated_edge_features.append(updated_features)
         return updated_edge_features
     from collections import defaultdict
@@ -1417,7 +1477,7 @@ class DatasetCreator:
         return True
 
     def create_dataset(self):
-        # Validate snapshot and label pairs before processing (unless skipped)
+        # 0) Validate snapshot/label pairs (optional)
         if not self.skip_validation:
             if self.fast_validation:
                 if not self.fast_validate_snapshots_and_labels():
@@ -1429,86 +1489,192 @@ class DatasetCreator:
                     return
         else:
             print("⚠️  Skipping snapshot-label validation as requested.")
-        
-        print(f"Creating static junction data...")
+
+        # 1) Static nodes/edges
+        print("Creating static junction data...")
         static_junction_ids_to_index, static_junction_features = self.process_junctions()
-        
-        # Validate junction features
-        for i, features in enumerate(static_junction_features):
-            if len(features) != NODE_FEATURES_COUNT:
-                print(f"ERROR: Junction {i} has {len(features)} features, expected {NODE_FEATURES_COUNT}. Terminating.")
+
+        for i, f in enumerate(static_junction_features):
+            if len(f) != NODE_FEATURES_COUNT:
+                print(f"ERROR: Junction {i} has {len(f)} features, expected {NODE_FEATURES_COUNT}. Terminating.")
                 exit(1)
-        print(f"✓ Junction features validated: {len(static_junction_features)} junctions with {NODE_FEATURES_COUNT} features each")
-        
-        print("creating static edge data...")
-        static_edge_index, static_edge_type, static_edge_ids_to_index, static_edge_features = self.process_static_edges(static_junction_ids_to_index)   
-        
-        # Validate edge features
-        for i, features in enumerate(static_edge_features):
-            if len(features) != EDGE_FEATURES_COUNT:
-                print(f"ERROR: Edge {i} has {len(features)} features, expected {EDGE_FEATURES_COUNT}. Terminating.")
+        print(f"✓ Junction features validated: {len(static_junction_features)} junctions × {NODE_FEATURES_COUNT} dims")
+
+        print("Creating static edge data...")
+        static_edge_index, static_edge_type, static_edge_ids_to_index, static_edge_features = self.process_static_edges(
+            static_junction_ids_to_index
+        )
+
+        for i, f in enumerate(static_edge_features):
+            if len(f) != EDGE_FEATURES_COUNT:
+                print(f"ERROR: Edge {i} has {len(f)} features, expected {EDGE_FEATURES_COUNT}. Terminating.")
                 exit(1)
-        print(f"✓ Edge features validated: {len(static_edge_features)} edges with {EDGE_FEATURES_COUNT} features each")
-        
+        print(f"✓ Edge features validated: {len(static_edge_features)} edges × {EDGE_FEATURES_COUNT} dims")
+
+        # For mapping idx -> edge_id (safe inverse, not relying on dict order)
+        idx_to_edge_id = {idx: eid for eid, idx in static_edge_ids_to_index.items()}
+
+        # 2) Convert snapshots
         print(f"Converting {len(self.snapshot_files)} snapshots to PyG Data objects...")
         skipped_count = 0
+
         for snap_file in tqdm(self.snapshot_files, desc="Processing snapshots"):
-            y_tensor, current_vehicle_ids, y_cat_tensors, y_binary_tensor = self.process_labels(snap_file)
-            
-            # Skip if no vehicles in this snapshot or if label file was missing/corrupted
+            # 2.1) Labels
+            y_dict, current_vehicle_ids, y_cat_tensors, y_binary_tensor = self.process_labels(snap_file)
             if len(current_vehicle_ids) == 0:
-                print(f"WARNING: Snapshot {snap_file} has no vehicles or missing label file. Skipping.")
+                print(f"WARNING: Snapshot {snap_file} has no vehicles or missing/corrupted labels. Skipping.")
                 skipped_count += 1
                 continue
-                
-            snapshot_data, vehicle_features, vehicle_routes_flat, vehicle_route_splits, current_vehicle_current_edges, current_vehicle_position_on_edges  = self.process_vehicle_features(snap_file, current_vehicle_ids, static_edge_ids_to_index, static_edge_features)
-            
-            # Validate vehicle features
-            for i, features in enumerate(vehicle_features):
-                if len(features) != NODE_FEATURES_COUNT:
-                    print(f"ERROR: Vehicle {current_vehicle_ids[i]} has {len(features)} features, expected {NODE_FEATURES_COUNT}. Terminating.")
+
+            # 2.2) Vehicle features (base); these include current_edge indices & (possibly) pos_on_edge
+            snapshot_data, vehicle_features, vehicle_routes_flat, vehicle_route_splits, \
+                current_vehicle_current_edges, current_vehicle_position_on_edges = self.process_vehicle_features(
+                    snap_file, current_vehicle_ids, static_edge_ids_to_index, static_edge_features
+                )
+
+            # Validate vehicle feature length
+            for vi, f in enumerate(vehicle_features):
+                if len(f) != NODE_FEATURES_COUNT:
+                    print(f"ERROR: Vehicle {current_vehicle_ids[vi]} has {len(f)} features, expected {NODE_FEATURES_COUNT}. Terminating.")
                     exit(1)
-            
+
+            # Tensors from lists
             vehicle_routes_flat_tensor = torch.LongTensor(vehicle_routes_flat)
             vehicle_route_splits_tensor = torch.LongTensor(vehicle_route_splits)
             current_vehicle_current_edges_tensor = torch.LongTensor(current_vehicle_current_edges)
+
+            # 2.3) Force position_on_edge to be FRACTION in [0,1] (fix)
+            veh_nodes_by_id = {n.get('id'): n for n in snapshot_data.get('nodes', []) if n.get('node_type') == 1}
+            pos_fracs = []
+            for i, vid in enumerate(current_vehicle_ids):
+                node = veh_nodes_by_id.get(vid)
+                if node is None:
+                    print(f"ERROR: Vehicle {vid} not found in snapshot nodes. Terminating.")
+                    exit(1)
+                pos_m = node.get("current_position", None)
+                if pos_m is None or not isinstance(pos_m, (int, float)):
+                    print(f"ERROR: Vehicle {vid} has invalid current_position={pos_m}. Terminating.")
+                    exit(1)
+                ei = int(current_vehicle_current_edges[i])
+                if ei < 0 or ei >= len(idx_to_edge_id):
+                    print(f"ERROR: current_edge index {ei} out of range. Terminating.")
+                    exit(1)
+                edge_id = idx_to_edge_id[ei]
+                edge_info = self.entities_data['edge']['features'].get(edge_id)
+                if edge_info is None:
+                    print(f"ERROR: Edge {edge_id} not found in edge features map. Terminating.")
+                    exit(1)
+                edge_len_m = float(edge_info.get('length', -1.0))
+                if edge_len_m <= 0:
+                    print(f"ERROR: Edge {edge_id} has non-positive length {edge_len_m}. Terminating.")
+                    exit(1)
+                frac = float(pos_m) / max(1e-8, edge_len_m)
+                # clamp to [0,1] to absorb tiny sim drift
+                frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
+                pos_fracs.append(frac)
+            current_vehicle_position_on_edges = pos_fracs  # override with robust fractions
             current_vehicle_position_on_edges_tensor = torch.FloatTensor(current_vehicle_position_on_edges)
 
-           
-            if len(y_tensor) != len(current_vehicle_ids):
-                print(f"ERROR: y_tensor length {len(y_tensor)} does not match current_vehicle_ids length {len(current_vehicle_ids)}. Terminating.")
+            # 2.4) Basic structural validations
+            if len(y_dict["raw"]) != len(current_vehicle_ids):
+                print(f"ERROR: y_dict[raw] len {len(y_dict['raw'])} != vehicles {len(current_vehicle_ids)}. Terminating.")
                 exit(1)
             if len(static_edge_index[0]) != len(static_edge_index[1]) or len(static_edge_type) != len(static_edge_index[0]):
-                print(f"ERROR: static_edge_index and static_edge_type lengths do not match. Terminating.")
+                print("ERROR: static_edge_index and static_edge_type lengths do not match. Terminating.")
                 exit(1)
             if len(static_edge_features) != len(static_edge_ids_to_index):
-                print(f"ERROR: static_edge_features length {len(static_edge_features)} does not match static_edge_ids_to_index length {len(static_edge_ids_to_index)}. Terminating.")
-                exit(1) 
-            
-            static_edge_features_updated = self.update_edge_features(snapshot_data, current_vehicle_ids, static_edge_features)
-            edge_attr_tensor = torch.FloatTensor(static_edge_features_updated)
-            
-            # Validate updated edge features
-            for i, features in enumerate(static_edge_features_updated):
-                if len(features) != EDGE_FEATURES_COUNT:
-                    print(f"ERROR: Updated edge {i} has {len(features)} features, expected {EDGE_FEATURES_COUNT}. Terminating.")
-                    exit(1)
-
-            # 1. get vehicle features
-            # 2. for each vehicle, update edge demand and occupancy from static_edge_features_updated
-
-            for idx, veh_features in enumerate(vehicle_features):
-                veh_features[23] = static_edge_features_updated[veh_features[22]][5]
-                veh_features[24] = static_edge_features_updated[veh_features[22]][6]
-
-
-            x = [*static_junction_features, *vehicle_features]  # Combine static junction features with vehicle features
-            x_tensor = torch.FloatTensor(x) # nodes features tensor = [static junction features, vehicle features]
- 
-            if len(x_tensor) != len(static_junction_features) + len(current_vehicle_ids):
-                print(f"ERROR: x_tensor length {len(x_tensor)} does not match expected length {len(static_junction_features) + len(current_vehicle_ids)}. Terminating.")
+                print(f"ERROR: static_edge_features len {len(static_edge_features)} != ids map len {len(static_edge_ids_to_index)}. Terminating.")
                 exit(1)
 
+            # 2.5) Update dynamic edge attributes (avg_speed, demand, occupancy)
+            static_edge_features_updated = self.update_edge_features(snapshot_data, current_vehicle_ids, static_edge_features)
+            edge_attr_tensor = torch.FloatTensor(static_edge_features_updated)
+
+            for i, f in enumerate(static_edge_features_updated):
+                if len(f) != EDGE_FEATURES_COUNT:
+                    print(f"ERROR: Updated edge {i} has {len(f)} features, expected {EDGE_FEATURES_COUNT}. Terminating.")
+                    exit(1)
+
+            # 2.6) Write current-edge demand/occup into vehicle feature cols 23/24
+            for i, veh_f in enumerate(vehicle_features):
+                cur_edge_idx = int(current_vehicle_current_edges[i])
+                veh_f[23] = static_edge_features_updated[cur_edge_idx][5]  # demand
+                veh_f[24] = static_edge_features_updated[cur_edge_idx][6]  # occupancy
+
+            # 2.7) Arrival-time–discounted, length-weighted route-left means → cols 25/26
+            HALF_LIFE_SEC = 300.0
+            LAMBDA = math.log(2.0) / HALF_LIFE_SEC
+            EPS_V = 0.5
+
+            edge_stats = self.entities_data['edge']['stats']
+            LEN_MAX = float(edge_stats['length']['max'])               # if normalized, length = norm * LEN_MAX
+            SPD_MIN = float(edge_stats['avg_speed']['min'])
+            SPD_MAX = float(edge_stats['avg_speed']['max'])
+            SPD_RANGE = max(1e-6, SPD_MAX - SPD_MIN)
+
+            for i, vid in enumerate(current_vehicle_ids):
+                node = veh_nodes_by_id.get(vid)
+                route_left_ids = node.get('route_left', [])
+
+                # time until leaving current edge
+                cur_ei = int(current_vehicle_current_edges[i])
+                pos_frac = float(current_vehicle_position_on_edges[i])  # already fraction 0..1
+
+                if self.normalize:
+                    cur_len_m = static_edge_features[cur_ei][4] * LEN_MAX
+                    cur_speed_m = SPD_MIN + static_edge_features_updated[cur_ei][0] * SPD_RANGE
+                else:
+                    cur_len_m = static_edge_features[cur_ei][4]          # raw meters
+                    cur_speed_m = static_edge_features_updated[cur_ei][0] # raw m/s
+                cur_speed_m = max(EPS_V, float(cur_speed_m))
+                rem_m = (1.0 - pos_frac) * cur_len_m
+                tau_to_next = rem_m / cur_speed_m
+
+                num_d = num_o = 0.0
+                den = 0.0
+                tau_accum = tau_to_next
+
+                for eid in route_left_ids:
+                    ei = static_edge_ids_to_index.get(eid)
+                    if ei is None:
+                        print(f"ERROR: Edge {eid} not found for route_left.")
+                        exit(1)
+
+                    if self.normalize:
+                        Lw_norm = static_edge_features[ei][4]                # normalized length
+                        v_mps = SPD_MIN + static_edge_features_updated[ei][0] * SPD_RANGE
+                        v_mps = max(EPS_V, v_mps)
+                        dt_edge = (Lw_norm * LEN_MAX) / v_mps
+                    else:
+                        Lw_m = static_edge_features[ei][4]                   # raw meters
+                        v_mps = max(EPS_V, static_edge_features_updated[ei][0])
+                        dt_edge = Lw_m / v_mps
+
+                    disc = math.exp(-LAMBDA * tau_accum)
+                    D = static_edge_features_updated[ei][5]   # (norm or raw) demand
+                    O = static_edge_features_updated[ei][6]   # (norm or raw) occupancy
+
+                    # If normalize: Lw_norm is proper weight; else: use raw length weight
+                    w = (static_edge_features[ei][4] if self.normalize else Lw_m) * disc
+                    num_d += D * w
+                    num_o += O * w
+                    den += w
+                    tau_accum += dt_edge
+
+                d_disc = float(num_d / den) if den > 0 else 0.0
+                o_disc = float(num_o / den) if den > 0 else 0.0
+
+                vehicle_features[i][25] = d_disc
+                vehicle_features[i][26] = o_disc
+
+            # 2.8) Build node matrix
+            x = [*static_junction_features, *vehicle_features]
+            x_tensor = torch.FloatTensor(x)
+            if len(x_tensor) != len(static_junction_features) + len(current_vehicle_ids):
+                print(f"ERROR: x_tensor len {len(x_tensor)} != expected {len(static_junction_features) + len(current_vehicle_ids)}. Terminating.")
+                exit(1)
+
+            # 2.9) Dynamic edges (J→V, V→V, V→J)
             dynamic_edge_index, dynamic_edge_type, dynamic_edge_attr = self.construct_dynamic_edges(
                 current_vehicle_ids=current_vehicle_ids,
                 current_vehicle_current_edges=current_vehicle_current_edges_tensor,
@@ -1521,6 +1687,7 @@ class DatasetCreator:
                 junction_offset=0
             )
 
+            # 2.10) Merge static+dynamic edges
             full_edge_index = [
                 static_edge_index[0] + dynamic_edge_index[0],
                 static_edge_index[1] + dynamic_edge_index[1]
@@ -1532,63 +1699,70 @@ class DatasetCreator:
             edge_type_tensor = torch.tensor(full_edge_type, dtype=torch.long)
 
             if edge_index_tensor.shape[1] != len(full_edge_type):
-                print(f"ERROR: Edge index tensor shape {edge_index_tensor.shape} does not match edge type length {len(full_edge_type)}. Terminating.")
+                print(f"ERROR: edge_index columns {edge_index_tensor.shape[1]} != edge_type len {len(full_edge_type)}. Terminating.")
                 exit(1)
             if edge_index_tensor.shape[0] != 2:
-                print(f"ERROR: Edge index tensor should have 2 rows, found {edge_index_tensor.shape[0]}. Terminating.")
-                exit(1)
-            if edge_type_tensor.shape[0] != len(full_edge_type):
-                print(f"ERROR: Edge type tensor length {edge_type_tensor.shape[0]} does not match full_edge_type length {len(full_edge_type)}. Terminating.")
-                exit(1)
-            if edge_attr_tensor.shape[0] != len(static_edge_ids_to_index):
-                print(f"ERROR: Edge attribute tensor length {edge_attr_tensor.shape[0]} does not match static_edge_ids_to_index length {len(static_edge_ids_to_index)}. Terminating.")
+                print(f"ERROR: edge_index must have 2 rows, got {edge_index_tensor.shape[0]}. Terminating.")
                 exit(1)
             if edge_attr_tensor.shape[1] != full_edge_attr_tensor.shape[1]:
-                print(f"ERROR: Edge attribute tensor feature dimension {edge_attr_tensor.shape[1]} does not match full_edge_attr_tensor feature dimension {full_edge_attr_tensor.shape[1]}. Terminating.")
+                print("ERROR: Edge feature dims mismatch between static and dynamic.")
                 exit(1)
-            if full_edge_index[0] is None or full_edge_index[1] is None:
-                print(f"ERROR: Full edge index has None values. Terminating.")
-                exit(1)
-            if len(full_edge_index[0]) != len(full_edge_index[1]) or len(full_edge_type) != len(full_edge_index[0]):
-                print(f"ERROR: Full edge index and type lengths do not match. Terminating.")
-                exit(1)
-            
 
-
+            # 2.11) Assemble PyG Data
             data = Data(
-                        x=x_tensor,
-                        edge_index=edge_index_tensor,
-                        edge_type=edge_type_tensor,
-                        edge_attr=full_edge_attr_tensor,
-                        vehicle_ids=current_vehicle_ids,
-                        junction_ids=list(static_junction_ids_to_index.keys()),
-                        edge_ids=list(static_edge_ids_to_index.keys()),
-                        vehicle_routes=vehicle_routes_flat_tensor,
-                        vehicle_route_splits=vehicle_route_splits_tensor,
-                        current_vehicle_current_edges=current_vehicle_current_edges_tensor,
-                        current_vehicle_position_on_edges=current_vehicle_position_on_edges_tensor,
-                        y=y_tensor,
-                        y_equal_thirds=y_cat_tensors['equal_thirds'],
-                        y_quartile=y_cat_tensors['quartile'],
-                        y_mean_pm_0_5_std=y_cat_tensors['mean_pm_0_5_std'],
-                        y_median_pm_0_5_iqr=y_cat_tensors['median_pm_0_5_iqr'],
-                        y_binary_eta=y_binary_tensor
+                x=x_tensor,
+                edge_index=edge_index_tensor,
+                edge_type=edge_type_tensor,
+                edge_attr=full_edge_attr_tensor,
+
+                vehicle_ids=current_vehicle_ids,
+                junction_ids=list(static_junction_ids_to_index.keys()),
+                edge_ids=list(static_edge_ids_to_index.keys()),
+
+                vehicle_routes=vehicle_routes_flat_tensor,
+                vehicle_route_splits=vehicle_route_splits_tensor,
+                current_vehicle_current_edges=current_vehicle_current_edges_tensor,
+                current_vehicle_position_on_edges=current_vehicle_position_on_edges_tensor,
+
+                x_base_dim=torch.tensor(BASE_FEATURES_COUNT, dtype=torch.long),   # 26
+                route_feat_idx=torch.tensor([25, 27], dtype=torch.long),          # [start,end) = 25..27
+
+                # targets
+                y=y_dict["raw"],
+                y_minmax=y_dict["minmax"],
+                y_z=y_dict["z"],
+                y_log=y_dict["log"],
+                y_log_z=y_dict["log_z"],
+
+                # categoricals/binary (from RAW seconds)
+                y_equal_thirds=y_cat_tensors['equal_thirds'],
+                y_quartile=y_cat_tensors['quartile'],
+                y_mean_pm_0_5_std=y_cat_tensors['mean_pm_0_5_std'],
+                y_median_pm_0_5_iqr=y_cat_tensors['median_pm_0_5_iqr'],
+                y_binary_eta=y_binary_tensor,
+
+                # normalization metadata (needed to invert during eval)
+                eta_p98=torch.tensor(float(self.entities_data['label']['stats']['eta']['98%'])),
+                eta_mean=torch.tensor(float(self.entities_data['label']['stats']['eta']['mean'])),
+                eta_std=torch.tensor(max(1e-8, float(self.entities_data['label']['stats']['eta']['std']))),
+                eta_log_mean=torch.tensor(float(self.entities_data['label']['stats']['eta']['log_mean'])),
+                eta_log_std=torch.tensor(max(1e-8, float(self.entities_data['label']['stats']['eta']['log_std']))),
             )
-            
-            # Final validation of the PyG Data object
+
+            # Final sanity
             if data.x.shape[1] != NODE_FEATURES_COUNT:
-                print(f"ERROR: Final node features have {data.x.shape[1]} dimensions, expected {NODE_FEATURES_COUNT}. Terminating.")
+                print(f"ERROR: Final node features have {data.x.shape[1]} dims, expected {NODE_FEATURES_COUNT}. Terminating.")
                 exit(1)
             if data.edge_attr.shape[1] != EDGE_FEATURES_COUNT:
-                print(f"ERROR: Final edge features have {data.edge_attr.shape[1]} dimensions, expected {EDGE_FEATURES_COUNT}. Terminating.")
+                print(f"ERROR: Final edge features have {data.edge_attr.shape[1]} dims, expected {EDGE_FEATURES_COUNT}. Terminating.")
                 exit(1)
-            
-            # Save the data object to a .pt file
+
+            # 2.12) Save
             out_file = os.path.join(self.out_graph_folder, snap_file.replace(".json", ".pt"))
             torch.save(data, out_file)
-            # print(f"✓ Saved {snap_file.replace('.json', '.pt')} with {data.x.shape[0]} nodes, {data.edge_index.shape[1]} edges")
-        
-        # Print summary of processing
+            # print(f"✓ Saved {os.path.basename(out_file)}: {data.x.shape[0]} nodes, {data.edge_index.shape[1]} edges")
+
+        # 3) Summary
         total_files = len(self.snapshot_files)
         processed_files = total_files - skipped_count
         print(f"\n✅ Dataset creation completed!")
@@ -1599,24 +1773,25 @@ class DatasetCreator:
         print(f"   - Success rate: {(processed_files/total_files)*100:.2f}%")
 
 
+
 def main():
     parser = argparse.ArgumentParser(description="Create a traffic dataset from simulation snapshots.")
     parser.add_argument(
         '--config', 
-        default="/home/guy/Projects/Traffic/Traffic-DSTG-Gen/simulation.config.json", 
+        default="/home/guy/Projects/Traffic/Traffic-DSTG-Gen/simulation.config.2days.json", 
         help="Path to simulation config JSON file."
     )
     
     parser.add_argument(
         "--snapshots_folder",
         type=str,
-        default="/media/guy/StorageVolume/traffic_data",
+        default="/media/guy/StorageVolume/traffic_data_2days",
         help="Folder with snapshot JSON files"
     )
     parser.add_argument(
         "--labels_folder",
         type=str,
-        default="/media/guy/StorageVolume/traffic_data/labels",
+        default="/media/guy/StorageVolume/traffic_data_2days/labels",
         help="Folder with per-snapshot label JSON files"
     )
     parser.add_argument(
@@ -1628,7 +1803,7 @@ def main():
     parser.add_argument(
         "--out_graph_folder",
         type=str,
-        default="/home/guy/Projects/Traffic/traffic_data_pt",
+        default="/home/guy/Projects/Traffic/traffic_data_2days_aware_pt",
         help="Output folder for .pt graph files"
     )
     parser.add_argument(
