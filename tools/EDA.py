@@ -397,6 +397,11 @@ def summarize_labels(labels_folder, export_folder="./eda_exports", entity_type=N
                 "num_missing": sum(pd.isna(vals_clean)),
                 "num_unique": pd.Series(vals_clean).nunique()
             }
+            # 👉 Extra stats for ETA in log space
+            if feat == "eta":
+                vals_log = np.log1p(vals_for_stats)
+                summary["log_mean"] = float(np.mean(vals_log))
+                summary["log_std"] = float(np.std(vals_log) + 1e-8)  # avoid div/0
         elif feat == 'vehicle_id':
             summary = {
                 "feature": feat,
