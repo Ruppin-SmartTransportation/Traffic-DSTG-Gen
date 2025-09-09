@@ -907,7 +907,7 @@ class DatasetCreator:
             features.append(feature)
 
             # 2. Extract route and current edge information
-            route_edge_ids = vehicle_node.get('route', [])
+            route_edge_ids = vehicle_node.get('route_left', [])
             route_edge_indices = []
             for eid in route_edge_ids:
                 if eid not in static_edge_ids_to_index:
@@ -1719,8 +1719,8 @@ class DatasetCreator:
                 junction_ids=list(static_junction_ids_to_index.keys()),
                 edge_ids=list(static_edge_ids_to_index.keys()),
 
-                vehicle_routes=vehicle_routes_flat_tensor,
-                vehicle_route_splits=vehicle_route_splits_tensor,
+                vehicle_route_left=vehicle_routes_flat_tensor,
+                vehicle_route_left_splits=vehicle_route_splits_tensor,
                 current_vehicle_current_edges=current_vehicle_current_edges_tensor,
                 current_vehicle_position_on_edges=current_vehicle_position_on_edges_tensor,
 
