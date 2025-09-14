@@ -14,7 +14,13 @@
 This toolkit integrates with SUMO (Simulation of Urban Mobility) and supports user-defined scenarios, including complex urban environments with multiple traffic zones and **explicit route awareness** for accurate ETA prediction.
 
 ---
+## Demo
 
+> **Simulation of urban_three_zones scenario**  
+
+![Simulation Demo](tools/demo.gif)
+
+---
 ## 🚀 Key Features
 
 - **Dynamic Graph Generation**  
