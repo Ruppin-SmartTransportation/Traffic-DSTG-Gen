@@ -183,25 +183,22 @@ def main():
     parser.add_argument(
         "--pt_folder",
         type=str,
-        default="/home/guy/Projects/Traffic/traffic_data_pt",
         help="Folder with .pt graph files"
     )
     parser.add_argument(
         "--gt_folder",
         type=str,
-        default="/media/guy/StorageVolume/traffic_data/labels",
         help="Folder with GT labels JSON files"
     )
     parser.add_argument(
         "--snapshot_folder",
         type=str,
-        default="/media/guy/StorageVolume/traffic_data",
         help="Folder with snapshot JSON files"
     )
     parser.add_argument(
         "--eda_folder",
         type=str,
-        default="eda_exports",
+        default="./eda_exports",
         help="Folder with feature summary CSVs"
     )
     parser.add_argument(

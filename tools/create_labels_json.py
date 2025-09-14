@@ -132,19 +132,16 @@ def main():
     parser.add_argument(
         "--snapshots_folder",
         type=str,
-        default="/media/guy/StorageVolume/traffic_data",
         help="Path to folder with snapshot JSON files"
     )
     parser.add_argument(
         "--gt_labels_path",
         type=str,
-        default="/media/guy/StorageVolume/traffic_data/labels.json",
         help="Path to ground truth labels.json file"
     )
     parser.add_argument(
         "--output_labels_folder",
         type=str,
-        default="/media/guy/StorageVolume/traffic_data/labels",
         help="Folder where per-snapshot label files will be written"
     )
     args = parser.parse_args()

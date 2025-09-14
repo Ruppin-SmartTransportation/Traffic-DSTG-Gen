@@ -808,8 +808,8 @@ class DatasetRestorer:
 def main():
     parser = argparse.ArgumentParser(description="Restore a PyG .pt file to a human-readable JSON snapshot.")
     parser.add_argument('--pt_file', type=str, required=True, help='Path to the .pt file to restore.')
-    parser.add_argument('--stats_dir', type=str, default='/home/guy/Projects/Traffic/Traffic-DSTG-Gen/eda_exports', help='Directory with normalization statistics (default: eda_exports)')
-    parser.add_argument('--mapping_dir', type=str, default='/home/guy/Projects/Traffic/Traffic-DSTG-Gen/eda_exports/mappings', help='Directory with mapping files (default: eda_exports/mappings)')
+    parser.add_argument('--stats_dir', type=str, default='./eda_exports', help='Directory with normalization statistics (default: eda_exports)')
+    parser.add_argument('--mapping_dir', type=str, default='./eda_exports/mappings', help='Directory with mapping files (default: eda_exports/mappings)')
     parser.add_argument('--output_json', type=str, default=None, help='Path to save the restored JSON (optional)')
     parser.add_argument('--compare_with', type=str, default=None, help='Path to original JSON file to compare restoration accuracy')
     parser.add_argument('--labels_folder', type=str, default=None, help='Path to labels folder for duration analysis of missing vehicles')

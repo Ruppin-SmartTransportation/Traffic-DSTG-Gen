@@ -1060,7 +1060,6 @@ class DatasetCreator:
 
             updated_edge_features.append(updated_features)
         return updated_edge_features
-    from collections import defaultdict
 
     def construct_dynamic_edges(
         self,
@@ -1778,32 +1777,27 @@ def main():
     parser = argparse.ArgumentParser(description="Create a traffic dataset from simulation snapshots.")
     parser.add_argument(
         '--config', 
-        default="/home/guy/Projects/Traffic/Traffic-DSTG-Gen/simulation.config.2days.json", 
         help="Path to simulation config JSON file."
     )
     
     parser.add_argument(
         "--snapshots_folder",
         type=str,
-        default="/media/guy/StorageVolume/traffic_data_2days",
         help="Folder with snapshot JSON files"
     )
     parser.add_argument(
         "--labels_folder",
         type=str,
-        default="/media/guy/StorageVolume/traffic_data_2days/labels",
         help="Folder with per-snapshot label JSON files"
     )
     parser.add_argument(
         "--eda_folder",
         type=str,
-        default="/home/guy/Projects/Traffic/Traffic-DSTG-Gen/eda_exports",
         help="Folder with labels and feature summary CSVs"
     )
     parser.add_argument(
         "--out_graph_folder",
         type=str,
-        default="/home/guy/Projects/Traffic/traffic_data_2days_aware_pt",
         help="Output folder for .pt graph files"
     )
     parser.add_argument(
@@ -1830,7 +1824,6 @@ def main():
     parser.add_argument(
         "--mapping_folder",
         type=str,
-        default="/home/guy/Projects/Traffic/Traffic-DSTG-Gen/eda_exports/mappings",
         help="Folder with mappings for vehicle, junction, and edge features (default: eda_exports/mappings)"
     )
     
@@ -1844,7 +1837,6 @@ def main():
     parser.add_argument(
         "--eta_analysis_methods_path",
         type=str,
-        default="/home/guy/Projects/Traffic/Traffic-DSTG-Gen/eda_exports/eta/eta_analysis_methods.csv",
         help="Path to eta_analysis_methods.csv file (default: eda_exports/eta/eta_analysis_methods.csv)"
     )
 

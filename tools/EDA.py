@@ -1548,13 +1548,11 @@ def main():
         "snapshots_folder",
         type=str,
         nargs="?",
-        default="/media/guy/StorageVolume/traffic_data",
-        help="Path to folder with snapshot JSON files (default: /media/guy/StorageVolume/traffic_data)"
+        help="Path to folder with snapshot JSON files"
     )
     parser.add_argument(
         "--labels_folder",
         type=str,
-        default="/media/guy/StorageVolume/traffic_data/labels",
         help="Optional path to folder with label JSON files (e.g., labels_*.json)"
     )
     args = parser.parse_args()
