@@ -33,7 +33,7 @@ This toolkit integrates with SUMO (Simulation of Urban Mobility) and supports us
   Supports multiple edge types: static roads, junction-vehicle, vehicle-vehicle, and vehicle-junction relationships.
 
 - **Temporal Processing**  
-  Processes historical snapshots (30-snapshot windows) for temporal analysis and model training.
+  Processes historical snapshots (snapshot windows) for temporal analysis and model training.
 
 - **PyTorch Geometric Compatibility**  
   Exports datasets ready for modern GNN frameworks with comprehensive feature engineering.
@@ -190,7 +190,7 @@ python main.py --config simulation.config.json --sumo-gui
 ```
 
 **Outputs:**
-- `step_XXXXXX.json` - Traffic snapshots (every 30 seconds)
+- `step_XXXXXX.json` - Traffic snapshots (every configurable number of seconds)
 - `labels.json` - Global ground truth ETA labels
 - `eda_exports/mappings/` - ID mapping files
 
